@@ -696,20 +696,39 @@ def _deliver_configs(order_id, configs, subs):
             "💙 از خرید شما سپاسگزاریم!"
         )
 
-        # Send text + rename button
-        bot.send_message(user_id, msg_text, reply_markup=rename_kb)
+        # Build full caption for QR photo (max 1024 chars for Telegram captions)
+        caption = (
+            f"🎉 <b>سرویس شما فعال شد!</b> 🚀\n\n"
+            f"🏷️ <b>نام سرویس:</b> {svc['service_name']}\n"
+            f"📊 <b>حجم:</b> {plan['gb']} گیگابایت\n"
+            f"📅 <b>مدت اعتبار:</b> {plan['days']} روز\n\n"
+            f"🔐 <b>کانفیگ اتصال:</b>\n<code>{cfg}</code>\n\n"
+        )
+        if sub:
+            caption += f"🔗 <b>ساب‌لینک:</b>\n<code>{sub}</code>\n\n"
 
-        # Generate and send QR code for config
+        caption += (
+            "📷 <b>QR کد بالا را اسکن کنید</b> تا کانفیگ به صورت خودکار وارد اپلیکیشن شود.\n\n"
+            "📌 <b>راهنمای استفاده:</b>\n"
+            "  ۱. کانفیگ را کپی و در اپ ایمپورت کنید\n"
+            "  ۲. یا QR کد را با اپ اسکن کنید\n\n"
+            f"❓ پشتیبانی: @{SUPPORT_USERNAME}\n"
+            "💙 از خرید شما سپاسگزاریم!"
+        )
+
+        # Telegram caption limit is 1024 chars — truncate if needed
+        if len(caption) > 1024:
+            caption = caption[:1020] + "..."
+
+        # Generate QR (prefer sub-link, fallback to config)
         qr_target = sub if sub else cfg
         try:
             qr_buf = make_qr_bytes(qr_target)
-            qr_caption = (
-                f"📷 <b>کیوآر کد سرویس:</b> {svc['service_name']}\n\n"
-                "این کد را با دوربین یا اپلیکیشن V2Ray اسکن کنید تا کانفیگ به صورت خودکار وارد شود. 📱✨"
-            )
-            bot.send_photo(user_id, qr_buf, caption=qr_caption)
+            bot.send_photo(user_id, qr_buf, caption=caption, reply_markup=rename_kb)
         except Exception as e:
             print(f"QR generation error: {e}")
+            # Fallback: send text if QR fails
+            bot.send_message(user_id, msg_text, reply_markup=rename_kb)
 
     with get_db() as conn:
         conn.execute("UPDATE orders SET status='delivered' WHERE id=?", (order_id,))
