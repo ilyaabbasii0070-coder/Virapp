@@ -7,6 +7,7 @@ import io
 import html as html_lib
 from datetime import datetime
 
+import requests
 import telebot
 from telebot import types
 from flask import Flask, jsonify
@@ -33,22 +34,28 @@ def make_qr_bytes(text: str) -> io.BytesIO | None:
 # ─────────────────────────────────────────────
 #  ENV
 # ─────────────────────────────────────────────
-BOT_TOKEN  = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID   = int(os.environ.get("ADMIN_ID", "8030883585"))
-SECRET_KEY = os.environ.get("SECRET_KEY", "viranet_secret")
-PORT       = int(os.environ.get("PORT", 8080))
+BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID       = int(os.environ.get("ADMIN_ID", "8030883585"))
+SECRET_KEY     = os.environ.get("SECRET_KEY", "viranet_secret")
+PORT           = int(os.environ.get("PORT", 8080))
+TRX_WALLET     = os.environ.get("TRX_WALLET", "YOUR_TRX_WALLET_ADDRESS")
+USD_TO_TOMAN   = int(os.environ.get("USD_TO_TOMAN", "90000"))
 
 SUPPORT_USERNAME = "ViraNet0"
-CARD_NUMBER      = "123456789456123"
-CARD_OWNER       = "حسین حسینی"
 REFERRAL_BONUS   = 5000
 
-PLANS = {
-    "1gb": {"label": "⚡ 1GB  —  30 روز  —  400,000 تومان", "gb": 1, "days": 30, "price": 400_000},
-    "2gb": {"label": "🚀 2GB  —  30 روز  —  780,000 تومان", "gb": 2, "days": 30, "price": 780_000},
-    "3gb": {"label": "🔥 3GB  —  30 روز  —  1,100,000 تومان", "gb": 3, "days": 30, "price": 1_100_000},
-    "5gb": {"label": "💥 5GB  —  30 روز  —  1,800,000 تومان", "gb": 5, "days": 30, "price": 1_800_000},
-}
+# ── مقادیر پویا (از DB بارگذاری می‌شن) ──────────
+CARD_NUMBER = "123456789456123"
+CARD_OWNER  = "حسین حسینی"
+
+# ── وضعیت ربات ────────────────────────────────
+BOT_ONLINE = True
+
+# ── محصولات پویا (از DB بارگذاری می‌شن) ─────────
+PLANS: dict = {}
+
+# ── tracker برای thread‌های آپدیت قیمت کریپتو ──
+crypto_stop_events: dict = {}
 
 # ─────────────────────────────────────────────
 #  DATABASE
@@ -61,6 +68,7 @@ def get_db():
     return conn
 
 def init_db():
+    global CARD_NUMBER, CARD_OWNER
     with get_db() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
@@ -95,15 +103,15 @@ def init_db():
             created_at   TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS receipts (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id      INTEGER NOT NULL,
-            order_id     INTEGER,
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER NOT NULL,
+            order_id      INTEGER,
             wallet_amount INTEGER,
-            receipt_type TEXT NOT NULL,
-            file_id      TEXT,
-            status       TEXT DEFAULT 'pending',
-            admin_msg_id INTEGER,
-            created_at   TEXT DEFAULT (datetime('now'))
+            receipt_type  TEXT NOT NULL,
+            file_id       TEXT,
+            status        TEXT DEFAULT 'pending',
+            admin_msg_id  INTEGER,
+            created_at    TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS wallet_requests (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,6 +120,19 @@ def init_db():
             status       TEXT DEFAULT 'pending',
             admin_msg_id INTEGER,
             created_at   TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS products (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_key TEXT UNIQUE NOT NULL,
+            label    TEXT NOT NULL,
+            gb       INTEGER NOT NULL,
+            days     INTEGER NOT NULL,
+            price    INTEGER NOT NULL,
+            active   INTEGER DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );
         """)
 
@@ -122,7 +143,63 @@ def init_db():
         except Exception:
             pass
 
+        # اگه جدول محصولات خالیه، محصولات پیش‌فرض رو اضافه کن
+        cnt = conn.execute("SELECT COUNT(*) as c FROM products").fetchone()["c"]
+        if cnt == 0:
+            default_products = [
+                ("1gb",  "⚡ 1GB  —  30 روز  —  400,000 تومان",  1, 30, 400_000),
+                ("2gb",  "🚀 2GB  —  30 روز  —  780,000 تومان",  2, 30, 780_000),
+                ("3gb",  "🔥 3GB  —  30 روز  —  1,100,000 تومان", 3, 30, 1_100_000),
+                ("5gb",  "💥 5GB  —  30 روز  —  1,800,000 تومان", 5, 30, 1_800_000),
+            ]
+            conn.executemany(
+                "INSERT OR IGNORE INTO products(plan_key,label,gb,days,price) VALUES(?,?,?,?,?)",
+                default_products
+            )
+            conn.commit()
+
+        # تنظیمات کارت
+        r_card = conn.execute("SELECT value FROM settings WHERE key='card_number'").fetchone()
+        r_owner = conn.execute("SELECT value FROM settings WHERE key='card_owner'").fetchone()
+        if not r_card:
+            conn.execute("INSERT INTO settings(key,value) VALUES('card_number',?)", (CARD_NUMBER,))
+        if not r_owner:
+            conn.execute("INSERT INTO settings(key,value) VALUES('card_owner',?)", (CARD_OWNER,))
+        conn.commit()
+
+        # بارگذاری تنظیمات
+        r_card  = conn.execute("SELECT value FROM settings WHERE key='card_number'").fetchone()
+        r_owner = conn.execute("SELECT value FROM settings WHERE key='card_owner'").fetchone()
+        if r_card:
+            CARD_NUMBER = r_card["value"]
+        if r_owner:
+            CARD_OWNER = r_owner["value"]
+
+    reload_plans()
     print("✅ Database ready")
+
+def reload_plans():
+    global PLANS
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM products WHERE active=1 ORDER BY price").fetchall()
+    PLANS = {}
+    for r in rows:
+        PLANS[r["plan_key"]] = {
+            "label": r["label"],
+            "gb":    r["gb"],
+            "days":  r["days"],
+            "price": r["price"],
+        }
+
+def reload_card_settings():
+    global CARD_NUMBER, CARD_OWNER
+    with get_db() as conn:
+        r_card  = conn.execute("SELECT value FROM settings WHERE key='card_number'").fetchone()
+        r_owner = conn.execute("SELECT value FROM settings WHERE key='card_owner'").fetchone()
+    if r_card:
+        CARD_NUMBER = r_card["value"]
+    if r_owner:
+        CARD_OWNER = r_owner["value"]
 
 # ─────────────────────────────────────────────
 #  HELPERS
@@ -143,6 +220,8 @@ def ensure_user(tg_user, referred_by=None):
             if referred_by:
                 conn.execute("UPDATE users SET wallet=wallet+? WHERE user_id=?", (REFERRAL_BONUS, referred_by))
             conn.commit()
+            return True  # کاربر جدید
+    return False  # کاربر قدیمی
 
 def get_wallet(uid):
     u = get_user(uid)
@@ -169,6 +248,61 @@ def random_name():
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M")
 
+# ── قیمت لحظه‌ای TRX ─────────────────────────
+def get_trx_price_usd() -> float | None:
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=tron&vs_currencies=usd",
+            timeout=6
+        )
+        return float(r.json()["tron"]["usd"])
+    except Exception as e:
+        print(f"[TRX price error] {e}")
+        return None
+
+def toman_to_trx(toman_amount: int) -> float | None:
+    price = get_trx_price_usd()
+    if not price:
+        return None
+    return round(toman_amount / (USD_TO_TOMAN * price), 2)
+
+def crypto_payment_text(total_toman: int, trx_amount: float | None) -> str:
+    trx_line = (
+        f"<b>💎 معادل ترون (TRX): {trx_amount} TRX</b>"
+        if trx_amount is not None
+        else "⚠️ خطا در دریافت قیمت — لطفاً صبر کنید..."
+    )
+    return (
+        "🔐 <b>پرداخت با کریپتو — ترون (TRX)</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💵 <b>مبلغ سفارش شما:</b> {fmt(total_toman)} تومان\n\n"
+        f"{trx_line}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📌 <b>آدرس کیف پول TRX ما:</b>\n\n"
+        f"<code>{TRX_WALLET}</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📋 <b>مراحل پرداخت:</b>\n\n"
+        "   ۱️⃣  مقدار دقیق TRX بالا را به آدرس فوق ارسال کنید\n"
+        "   ۲️⃣  پس از ارسال، هش تراکنش (Transaction ID) خود را کپی کنید\n"
+        "   ۳️⃣  هش تراکنش را همین‌جا در چت برای ما ارسال کنید\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚠️ <b>نکات مهم:</b>\n\n"
+        "   🔹 فقط از شبکه <b>TRON (TRC-20)</b> استفاده کنید\n"
+        "   🔹 مقدار TRX را دقیقاً طبق نرخ لحظه ارسال کنید\n"
+        "   🔹 قیمت TRX هر ۱۰ ثانیه آپدیت می‌شود\n"
+        "   🔹 پس از ارسال هش، سفارش شما بررسی و فعال می‌شود\n"
+        "   🔹 زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🕐 <b>آخرین به‌روزرسانی قیمت:</b> " + datetime.now().strftime("%H:%M:%S") + "\n\n"
+        "👇 <b>هش تراکنش خود را ارسال کنید یا منتظر آپدیت قیمت بمانید:</b>"
+    )
+
+def crypto_payment_kb() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🔄 بروزرسانی قیمت", callback_data="crypto_refresh"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت به روش پرداخت", callback_data="crypto_back"))
+    return kb
+
 # ─────────────────────────────────────────────
 #  STATE MACHINE
 # ─────────────────────────────────────────────
@@ -182,11 +316,28 @@ def get_state(uid):
 
 def clear_state(uid):
     user_states.pop(uid, None)
+    # توقف thread آپدیت قیمت
+    if uid in crypto_stop_events:
+        crypto_stop_events[uid].set()
+        del crypto_stop_events[uid]
 
 # ─────────────────────────────────────────────
 #  BOT
 # ─────────────────────────────────────────────
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+# ── پیام خاموشی ربات ──────────────────────────
+OFFLINE_MSG = (
+    "🔧 <b>ربات موقتاً در دسترس نیست</b>\n\n"
+    "⚙️ در حال انجام بروزرسانی و بهبود سرویس هستیم.\n\n"
+    "🕐 این فرآیند ممکن است چند دقیقه طول بکشد.\n\n"
+    "📢 به محض اتمام عملیات، ربات مجدداً فعال خواهد شد.\n\n"
+    "🙏 از صبر و شکیبایی شما سپاسگزاریم.\n\n"
+    f"❓ برای اطلاعات بیشتر با پشتیبانی تماس بگیرید: @{SUPPORT_USERNAME}"
+)
+
+def is_offline_for(user_id: int) -> bool:
+    return not BOT_ONLINE and user_id != ADMIN_ID
 
 # ── Main Menu ──────────────────────────────────
 def main_menu_kb(user_id):
@@ -202,6 +353,10 @@ def main_menu_kb(user_id):
     kb.add(types.InlineKeyboardButton("🆘 پشتیبانی", url=f"https://t.me/{SUPPORT_USERNAME}"))
     if user_id == ADMIN_ID:
         kb.add(types.InlineKeyboardButton("⚙️ پنل ادمین", callback_data="menu_admin"))
+        kb.add(
+            types.InlineKeyboardButton("🔴 خاموش کردن ربات", callback_data="admin_bot_off"),
+            types.InlineKeyboardButton("🟢 روشن کردن ربات", callback_data="admin_bot_on"),
+        )
     return kb
 
 def send_main_menu(chat_id, user_id, text=None):
@@ -216,6 +371,9 @@ def send_main_menu(chat_id, user_id, text=None):
 # ─────────────────────────────────────────────
 @bot.message_handler(commands=["start"])
 def cmd_start(msg):
+    if is_offline_for(msg.from_user.id):
+        return bot.send_message(msg.chat.id, OFFLINE_MSG)
+
     args = msg.text.split()
     referred_by = None
     if len(args) > 1 and args[1].startswith("ref_"):
@@ -224,8 +382,23 @@ def cmd_start(msg):
             if r and r["user_id"] != msg.from_user.id:
                 referred_by = r["user_id"]
 
-    ensure_user(msg.from_user, referred_by)
+    is_new = ensure_user(msg.from_user, referred_by)
     clear_state(msg.from_user.id)
+
+    # اطلاع‌رسانی به ادمین برای کاربر جدید
+    if is_new:
+        try:
+            u = get_user(msg.from_user.id)
+            bot.send_message(
+                ADMIN_ID,
+                f"👤 <b>کاربر جدید ثبت شد!</b>\n\n"
+                f"🆔 آیدی: <code>{msg.from_user.id}</code>\n"
+                f"📛 نام: {u['full_name'] or '---'}\n"
+                f"👤 یوزرنیم: @{u['username'] or '---'}\n"
+                f"🕐 زمان: {now_str()}"
+            )
+        except Exception:
+            pass
 
     bot.send_message(
         msg.chat.id,
@@ -246,6 +419,8 @@ def cmd_start(msg):
 # ─────────────────────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data == "menu_shop")
 def cb_menu_shop(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات موقتاً خاموش است.", show_alert=True)
     u = get_user(call.from_user.id)
     if u and u["is_banned"]:
         return bot.answer_callback_query(call.id, "⛔ حساب شما مسدود است.", show_alert=True)
@@ -256,6 +431,8 @@ def cb_menu_shop(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_wallet")
 def cb_menu_wallet(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات موقتاً خاموش است.", show_alert=True)
     bot.answer_callback_query(call.id)
     ensure_user(call.from_user)
     clear_state(call.from_user.id)
@@ -263,12 +440,16 @@ def cb_menu_wallet(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_services")
 def cb_menu_services(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات موقتاً خاموش است.", show_alert=True)
     bot.answer_callback_query(call.id)
     ensure_user(call.from_user)
     _show_my_services(call.message.chat.id, call.from_user.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_referral")
 def cb_menu_referral(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات موقتاً خاموش است.", show_alert=True)
     bot.answer_callback_query(call.id)
     ensure_user(call.from_user)
     _show_referral(call.message.chat.id, call.from_user.id)
@@ -287,10 +468,41 @@ def cb_back_main(call):
     clear_state(call.from_user.id)
     send_main_menu(call.message.chat.id, call.from_user.id)
 
+# ── روشن/خاموش ربات ───────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "admin_bot_off")
+def cb_bot_off(call):
+    global BOT_ONLINE
+    if call.from_user.id != ADMIN_ID:
+        return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    bot.answer_callback_query(call.id)
+    BOT_ONLINE = False
+    bot.send_message(
+        call.message.chat.id,
+        "🔴 <b>ربات خاموش شد!</b>\n\n"
+        "از این لحظه، هیچ کاربری نمی‌تواند از ربات استفاده کند.\n"
+        "برای روشن کردن ربات، دکمه «🟢 روشن کردن ربات» را بزنید."
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_bot_on")
+def cb_bot_on(call):
+    global BOT_ONLINE
+    if call.from_user.id != ADMIN_ID:
+        return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    bot.answer_callback_query(call.id)
+    BOT_ONLINE = True
+    bot.send_message(
+        call.message.chat.id,
+        "🟢 <b>ربات روشن شد!</b>\n\n"
+        "ربات مجدداً فعال است و کاربران می‌توانند از آن استفاده کنند."
+    )
+
 # ─────────────────────────────────────────────
 #  🛒 SHOP
 # ─────────────────────────────────────────────
 def _show_shop(chat_id, user_id):
+    reload_plans()
+    if not PLANS:
+        return bot.send_message(chat_id, "❌ هیچ محصولی موجود نیست. لطفاً بعداً مراجعه کنید.")
     set_state(user_id, step="shop_plan")
     kb = types.InlineKeyboardMarkup(row_width=1)
     for key, plan in PLANS.items():
@@ -309,7 +521,10 @@ def _show_shop(chat_id, user_id):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("plan_"))
 def cb_plan(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات موقتاً خاموش است.", show_alert=True)
     plan_key = call.data[5:]
+    reload_plans()
     if plan_key not in PLANS:
         return bot.answer_callback_query(call.id, "پلن نامعتبر")
     bot.answer_callback_query(call.id)
@@ -326,6 +541,8 @@ def cb_plan(call):
 
 @bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "shop_quantity")
 def shop_quantity(msg):
+    if is_offline_for(msg.from_user.id):
+        return bot.send_message(msg.chat.id, OFFLINE_MSG)
     try:
         qty = int(msg.text.strip())
         if qty < 1 or qty > 20:
@@ -357,6 +574,8 @@ def _ask_name(chat_id, user_id, index, qty, plan_key, total):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("name_r_") or c.data.startswith("name_c_"))
 def cb_name(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات موقتاً خاموش است.", show_alert=True)
     state = get_state(call.from_user.id)
     if state.get("step") not in ("shop_name", "shop_name_input"):
         return bot.answer_callback_query(call.id)
@@ -387,6 +606,8 @@ def cb_name(call):
 
 @bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "shop_name_input")
 def shop_name_input(msg):
+    if is_offline_for(msg.from_user.id):
+        return bot.send_message(msg.chat.id, OFFLINE_MSG)
     name  = msg.text.strip()[:30]
     state = get_state(msg.from_user.id)
     names = state.get("names", [])
@@ -412,6 +633,7 @@ def _ask_payment(chat_id, user_id):
     kb.add(
         types.InlineKeyboardButton(f"💰 پرداخت از کیف پول  (موجودی: {fmt(wallet)} تومان)", callback_data="pay_wallet"),
         types.InlineKeyboardButton("💳 پرداخت کارت به کارت", callback_data="pay_card"),
+        types.InlineKeyboardButton("🌐 پرداخت با کریپتو", callback_data="pay_crypto"),
     )
     bot.send_message(
         chat_id,
@@ -424,8 +646,10 @@ def _ask_payment(chat_id, user_id):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data in ("pay_wallet", "pay_card"))
+@bot.callback_query_handler(func=lambda c: c.data in ("pay_wallet", "pay_card", "pay_crypto"))
 def cb_payment(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات موقتاً خاموش است.", show_alert=True)
     state = get_state(call.from_user.id)
     if state.get("step") != "shop_payment":
         return bot.answer_callback_query(call.id)
@@ -446,12 +670,124 @@ def cb_payment(call):
         deduct_wallet(call.from_user.id, total)
         _create_order_and_notify(call.from_user.id, call.message.chat.id, state, "wallet")
 
-    else:
-        # ── FIX: Create the order FIRST, then ask for receipt ──
+    elif call.data == "pay_card":
         _create_order_and_notify(call.from_user.id, call.message.chat.id, state, "card")
 
-def _create_order_and_notify(user_id, chat_id, state, payment_method):
-    """Creates the order in DB, sets state with order_id, then shows next step."""
+    else:  # pay_crypto
+        _start_crypto_payment(call.from_user.id, call.message.chat.id, state)
+
+# ── پرداخت کریپتو ────────────────────────────
+def _start_crypto_payment(user_id, chat_id, state):
+    set_state(user_id, step="shop_crypto_currency")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("🔷 ترون (TRX)", callback_data="crypto_trx"),
+        types.InlineKeyboardButton("🔙 بازگشت", callback_data="crypto_back"),
+    )
+    bot.send_message(
+        chat_id,
+        "🌐 <b>پرداخت با ارز دیجیتال</b>\n\n"
+        "ارز دیجیتال مورد نظر خود را انتخاب کنید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "crypto_trx")
+def cb_crypto_trx(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات موقتاً خاموش است.", show_alert=True)
+    state = get_state(call.from_user.id)
+    if state.get("step") not in ("shop_crypto_currency", "shop_crypto_wait"):
+        return bot.answer_callback_query(call.id)
+    bot.answer_callback_query(call.id, "⏳ در حال دریافت قیمت لحظه‌ای...")
+
+    total     = state["total_price"]
+    trx_amt   = toman_to_trx(total)
+    msg_text  = crypto_payment_text(total, trx_amt)
+
+    sent = bot.send_message(call.message.chat.id, msg_text, reply_markup=crypto_payment_kb())
+    set_state(call.from_user.id, step="shop_crypto_wait", crypto_msg_id=sent.message_id, crypto_chat_id=call.message.chat.id)
+
+    # شروع thread آپدیت خودکار
+    _start_crypto_updater(call.from_user.id, call.message.chat.id, sent.message_id, total)
+
+def _start_crypto_updater(user_id, chat_id, message_id, total_toman):
+    if user_id in crypto_stop_events:
+        crypto_stop_events[user_id].set()
+
+    stop_ev = threading.Event()
+    crypto_stop_events[user_id] = stop_ev
+
+    def updater():
+        while not stop_ev.wait(10):
+            if get_state(user_id).get("step") != "shop_crypto_wait":
+                break
+            trx_amt = toman_to_trx(total_toman)
+            try:
+                bot.edit_message_text(
+                    crypto_payment_text(total_toman, trx_amt),
+                    chat_id,
+                    message_id,
+                    reply_markup=crypto_payment_kb(),
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                print(f"[crypto updater] edit error: {e}")
+                break
+
+    threading.Thread(target=updater, daemon=True).start()
+
+@bot.callback_query_handler(func=lambda c: c.data == "crypto_refresh")
+def cb_crypto_refresh(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات موقتاً خاموش است.", show_alert=True)
+    state = get_state(call.from_user.id)
+    if state.get("step") != "shop_crypto_wait":
+        return bot.answer_callback_query(call.id)
+    bot.answer_callback_query(call.id, "🔄 در حال بروزرسانی قیمت...")
+    total   = state["total_price"]
+    trx_amt = toman_to_trx(total)
+    try:
+        bot.edit_message_text(
+            crypto_payment_text(total, trx_amt),
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=crypto_payment_kb(),
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+@bot.callback_query_handler(func=lambda c: c.data == "crypto_back")
+def cb_crypto_back(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if uid in crypto_stop_events:
+        crypto_stop_events[uid].set()
+        del crypto_stop_events[uid]
+    state = get_state(uid)
+    set_state(uid, step="shop_payment")
+    _ask_payment(call.message.chat.id, uid)
+
+# دریافت هش تراکنش کریپتو
+@bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "shop_crypto_wait")
+def crypto_tx_hash(msg):
+    if is_offline_for(msg.from_user.id):
+        return bot.send_message(msg.chat.id, OFFLINE_MSG)
+    tx_hash = (msg.text or "").strip()
+    if len(tx_hash) < 20:
+        return bot.send_message(msg.chat.id, "⚠️ هش تراکنش نامعتبر است. لطفاً هش صحیح را ارسال کنید.")
+
+    state = get_state(msg.from_user.id)
+    uid   = msg.from_user.id
+
+    # توقف thread آپدیت
+    if uid in crypto_stop_events:
+        crypto_stop_events[uid].set()
+        del crypto_stop_events[uid]
+
+    _create_order_and_notify(uid, msg.chat.id, state, "crypto", tx_hash=tx_hash)
+
+def _create_order_and_notify(user_id, chat_id, state, payment_method, tx_hash=None):
     plan_key = state["plan_key"]
     plan     = PLANS[plan_key]
     qty      = state["quantity"]
@@ -471,7 +807,6 @@ def _create_order_and_notify(user_id, chat_id, state, payment_method):
             )
         conn.commit()
 
-    # Prepare shared info for admin message
     u       = get_user(user_id)
     uname   = u["username"] or u["full_name"] or str(user_id)
     names_t = "\n".join([f"  {i+1}. {n}" for i, n in enumerate(names)])
@@ -504,8 +839,32 @@ def _create_order_and_notify(user_id, chat_id, state, payment_method):
             f"❓ سوال؟ پشتیبانی: @{SUPPORT_USERNAME}"
         )
 
+    elif payment_method == "crypto":
+        trx_amt = toman_to_trx(total)
+        bot.send_message(
+            ADMIN_ID,
+            f"🌐 <b>سفارش جدید — پرداخت کریپتو (TRX)</b>\n\n"
+            f"👤 کاربر: @{uname}  |  <code>{user_id}</code>\n"
+            f"🕐 زمان: {now_str()}\n\n"
+            f"📦 پلن: <b>{plan['label']}</b>\n"
+            f"🔢 تعداد: {qty} سرویس\n"
+            f"🏷️ نام‌ها:\n{names_t}\n\n"
+            f"💰 مبلغ: <b>{fmt(total)} تومان</b>\n"
+            f"🔷 معادل TRX: <b>{trx_amt} TRX</b>\n"
+            f"🔑 هش تراکنش: <code>{html_lib.escape(tx_hash or '')}</code>",
+            reply_markup=kb
+        )
+        clear_state(user_id)
+        bot.send_message(
+            chat_id,
+            "✅ <b>هش تراکنش شما دریافت شد!</b> 🔷\n\n"
+            "🚀 در حال بررسی تراکنش کریپتو شما هستیم.\n\n"
+            "⏳ پس از تایید، کانفیگ‌ها ارسال می‌شود.\n\n"
+            "📌 زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
+            f"❓ سوال؟ @{SUPPORT_USERNAME}"
+        )
+
     else:  # card
-        # State now has order_id so receipt handler can find it
         set_state(user_id, step="shop_receipt_wait", order_id=order_id)
         bot.send_message(
             chat_id,
@@ -522,9 +881,11 @@ def _create_order_and_notify(user_id, chat_id, state, payment_method):
             "👇 تصویر رسید واریزی خود را ارسال کنید:"
         )
 
-# ── Unified photo handler (func= filter unreliable for photos in some telebot versions)
+# ── Unified photo handler
 @bot.message_handler(content_types=["photo"])
 def handle_all_photos(msg):
+    if is_offline_for(msg.from_user.id):
+        return bot.send_message(msg.chat.id, OFFLINE_MSG)
     step = get_state(msg.from_user.id).get("step")
     if step == "shop_receipt_wait":
         _handle_shop_receipt(msg)
@@ -545,7 +906,7 @@ def _handle_shop_receipt(msg):
         order    = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
         svc_rows = conn.execute("SELECT * FROM order_services WHERE order_id=?", (order_id,)).fetchall()
 
-    plan    = PLANS[order["plan_key"]]
+    plan    = PLANS.get(order["plan_key"], {"gb": "?", "days": "?"})
     names   = [r["service_name"] for r in svc_rows]
     names_t = "\n".join([f"  {i+1}. {n}" for i, n in enumerate(names)])
 
@@ -630,7 +991,6 @@ def cb_admin_reject(call):
     )
     bot.send_message(call.message.chat.id, f"❌ سفارش #{order_id} رد شد و کاربر مطلع شد.")
 
-# Admin receives configs + sub-links step by step
 @bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_config")
 def adm_receive_config(msg):
     if msg.text and msg.text.strip() == "/done":
@@ -652,14 +1012,11 @@ def adm_receive_config(msg):
     if not text:
         return bot.send_message(msg.chat.id, "⚠️ متن خالی است. کانفیگ یا ساب‌لینک را ارسال کنید.")
 
-    # Alternate: config → sub → config → sub ...
     if len(configs) == len(subs):
-        # Expecting config
         configs.append(text)
         set_state(ADMIN_ID, configs=configs)
         bot.send_message(msg.chat.id, f"✅ کانفیگ {len(configs)} ثبت شد.\n\n📡 حالا ساب‌لینک مربوط به این کانفیگ را ارسال کنید:")
     else:
-        # Expecting sub-link
         subs.append(text)
         set_state(ADMIN_ID, subs=subs)
         if len(configs) < state.get("order_qty", 99):
@@ -678,34 +1035,28 @@ def _deliver_configs(order_id, configs, subs):
 
     plan    = PLANS.get(order["plan_key"], {"gb": "?", "days": "?"})
     user_id = order["user_id"]
-    print(f"[deliver] order_id={order_id} user_id={user_id} svcs={len(svc_rows)} configs={len(configs)} subs={len(subs)}")
 
     for i, svc in enumerate(svc_rows):
         cfg = configs[i] if i < len(configs) else "---"
         sub = subs[i]    if i < len(subs)    else ""
 
-        # ── Save to DB ──
         try:
             with get_db() as conn:
                 conn.execute("UPDATE order_services SET config_text=?, sub_link=? WHERE id=?",
                              (cfg, sub, svc["id"]))
                 conn.commit()
-            print(f"[deliver] svc_id={svc['id']} DB updated ok")
         except Exception as e:
             print(f"[deliver] DB update ERROR svc_id={svc['id']}: {e}")
             continue
 
         activation_time = datetime.now().strftime("%Y/%m/%d — %H:%M")
 
-        # ── Inline keyboard ──
-        # Only add URL button if sub is a valid http(s) URL (Telegram rejects others)
         kb = types.InlineKeyboardMarkup(row_width=1)
         sub_is_url = sub.startswith("http://") or sub.startswith("https://")
         if sub_is_url:
             kb.add(types.InlineKeyboardButton("🔗 باز کردن ساب‌لینک", url=sub))
         kb.add(types.InlineKeyboardButton("✏️ تغییر نام سرویس", callback_data=f"rename_{svc['id']}"))
 
-        # ── Build text — HTML-escape config & sub to avoid parse errors ──
         safe_cfg = html_lib.escape(cfg)
         safe_sub = html_lib.escape(sub) if sub else ""
 
@@ -729,14 +1080,11 @@ def _deliver_configs(order_id, configs, subs):
             "💙 از خرید شما سپاسگزاریم!"
         )
 
-        # ── STEP 1: Send text message (always) ──
         try:
             bot.send_message(user_id, full_text, reply_markup=kb)
-            print(f"[deliver] text message sent to user_id={user_id}")
         except Exception as e:
-            print(f"[deliver] send_message ERROR user_id={user_id}: {e}")
+            print(f"[deliver] send_message ERROR: {e}")
 
-        # ── STEP 2: Send QR photo (best-effort) ──
         qr_target = sub if sub else cfg
         qr_buf = make_qr_bytes(qr_target)
         if qr_buf:
@@ -753,12 +1101,10 @@ def _deliver_configs(order_id, configs, subs):
 # ── Rename service ─────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rename_"))
 def cb_rename(call):
-    svc_id = int(call.data[7:])
+    svc_id    = int(call.data[7:])
     caller_id = call.from_user.id
     with get_db() as conn:
-        # Lookup by id only first — compare user_id in Python to avoid type issues
         svc = conn.execute("SELECT * FROM order_services WHERE id=?", (svc_id,)).fetchone()
-    print(f"[rename] caller={caller_id} svc_id={svc_id} found={svc is not None} svc_user={svc['user_id'] if svc else 'N/A'}")
     if not svc or int(svc["user_id"]) != int(caller_id):
         return bot.answer_callback_query(call.id, "سرویس یافت نشد", show_alert=True)
     bot.answer_callback_query(call.id)
@@ -795,12 +1141,10 @@ def rename_service(msg):
 # ─────────────────────────────────────────────
 def _show_my_services(chat_id, user_id):
     with get_db() as conn:
-        # Cast both sides to int in Python to avoid any type mismatch
         all_svcs = conn.execute(
             "SELECT * FROM order_services WHERE config_text IS NOT NULL ORDER BY id DESC"
         ).fetchall()
     svcs = [s for s in all_svcs if int(s["user_id"]) == int(user_id)]
-    print(f"[my_services] user_id={user_id} total_with_config={len(all_svcs)} user_svcs={len(svcs)}")
 
     if not svcs:
         return bot.send_message(
@@ -812,7 +1156,7 @@ def _show_my_services(chat_id, user_id):
 
     kb = types.InlineKeyboardMarkup(row_width=1)
     for svc in svcs:
-        plan  = PLANS.get(svc["plan_key"], {})
+        plan = PLANS.get(svc["plan_key"], {})
         kb.add(types.InlineKeyboardButton(
             f"📦 {svc['service_name']}  |  {plan.get('gb','?')}GB",
             callback_data=f"vs_{svc['id']}"
@@ -873,6 +1217,8 @@ def _show_wallet(chat_id, user_id):
 
 @bot.callback_query_handler(func=lambda c: c.data == "wallet_charge")
 def cb_wallet_charge(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات موقتاً خاموش است.", show_alert=True)
     bot.answer_callback_query(call.id)
     set_state(call.from_user.id, step="wallet_amount")
     bot.send_message(
@@ -884,6 +1230,8 @@ def cb_wallet_charge(call):
 
 @bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "wallet_amount")
 def wallet_amount(msg):
+    if is_offline_for(msg.from_user.id):
+        return bot.send_message(msg.chat.id, OFFLINE_MSG)
     try:
         amount = int(msg.text.strip().replace(",", "").replace("٬", ""))
         if amount < 50_000:
@@ -1014,15 +1362,297 @@ def _show_referral(chat_id, user_id):
 #  ⚙️ ADMIN PANEL
 # ─────────────────────────────────────────────
 def _show_admin_panel(chat_id):
+    bot_status = "🟢 روشن" if BOT_ONLINE else "🔴 خاموش"
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
         types.InlineKeyboardButton("👥 لیست کاربران", callback_data="ap_users_0"),
         types.InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="ap_search"),
         types.InlineKeyboardButton("📊 آمار کلی", callback_data="ap_stats"),
         types.InlineKeyboardButton("📋 رسیدهای معلق", callback_data="ap_pending"),
+        types.InlineKeyboardButton("⚙️ تنظیمات", callback_data="ap_settings"),
     )
-    bot.send_message(chat_id, "⚙️ <b>پنل ادمین ویرا نت</b>\n\n👇 گزینه مورد نظر را انتخاب کنید:", reply_markup=kb)
+    bot.send_message(
+        chat_id,
+        f"⚙️ <b>پنل ادمین ویرا نت</b>\n\n"
+        f"📡 وضعیت ربات: <b>{bot_status}</b>\n\n"
+        "👇 گزینه مورد نظر را انتخاب کنید:",
+        reply_markup=kb
+    )
 
+# ── تنظیمات ─────────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_settings" and c.from_user.id == ADMIN_ID)
+def cb_ap_settings(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("💳 تنظیمات اطلاعات کارت", callback_data="ap_card_settings"),
+        types.InlineKeyboardButton("📦 تنظیمات محصولات", callback_data="ap_products"),
+        types.InlineKeyboardButton("🔙 پنل ادمین", callback_data="menu_admin"),
+    )
+    bot.send_message(
+        call.message.chat.id,
+        "⚙️ <b>تنظیمات</b>\n\n"
+        "یکی از گزینه‌های زیر را انتخاب کنید:",
+        reply_markup=kb
+    )
+
+# ── تنظیمات کارت ────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_card_settings" and c.from_user.id == ADMIN_ID)
+def cb_ap_card_settings(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("💳 تغییر شماره کارت", callback_data="ap_change_card"),
+        types.InlineKeyboardButton("👤 تغییر اسم صاحب کارت", callback_data="ap_change_owner"),
+        types.InlineKeyboardButton("🔙 تنظیمات", callback_data="ap_settings"),
+    )
+    bot.send_message(
+        call.message.chat.id,
+        f"💳 <b>تنظیمات اطلاعات کارت</b>\n\n"
+        f"شماره کارت فعلی: <code>{CARD_NUMBER}</code>\n"
+        f"نام صاحب کارت: <b>{CARD_OWNER}</b>\n\n"
+        "👇 گزینه مورد نظر را انتخاب کنید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_change_card" and c.from_user.id == ADMIN_ID)
+def cb_ap_change_card(call):
+    bot.answer_callback_query(call.id)
+    set_state(ADMIN_ID, step="adm_change_card")
+    bot.send_message(
+        call.message.chat.id,
+        "💳 <b>تغییر شماره کارت</b>\n\n"
+        f"شماره کارت فعلی: <code>{CARD_NUMBER}</code>\n\n"
+        "👇 شماره کارت جدید را وارد کنید:"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_change_owner" and c.from_user.id == ADMIN_ID)
+def cb_ap_change_owner(call):
+    bot.answer_callback_query(call.id)
+    set_state(ADMIN_ID, step="adm_change_owner")
+    bot.send_message(
+        call.message.chat.id,
+        "👤 <b>تغییر نام صاحب کارت</b>\n\n"
+        f"نام فعلی: <b>{CARD_OWNER}</b>\n\n"
+        "👇 نام صاحب کارت جدید را وارد کنید:"
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_change_card")
+def adm_change_card(msg):
+    global CARD_NUMBER
+    new_card = (msg.text or "").strip().replace(" ", "").replace("-", "")
+    if len(new_card) < 10 or not new_card.isdigit():
+        return bot.send_message(msg.chat.id, "⚠️ شماره کارت نامعتبر است. فقط اعداد وارد کنید (حداقل ۱۰ رقم).")
+    with get_db() as conn:
+        conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('card_number',?)", (new_card,))
+        conn.commit()
+    CARD_NUMBER = new_card
+    clear_state(ADMIN_ID)
+    bot.send_message(msg.chat.id, f"✅ شماره کارت با موفقیت تغییر یافت!\n\nشماره جدید: <code>{CARD_NUMBER}</code>")
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_change_owner")
+def adm_change_owner(msg):
+    global CARD_OWNER
+    new_owner = (msg.text or "").strip()
+    if len(new_owner) < 3:
+        return bot.send_message(msg.chat.id, "⚠️ نام نمی‌تواند کمتر از ۳ کاراکتر باشد.")
+    with get_db() as conn:
+        conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('card_owner',?)", (new_owner,))
+        conn.commit()
+    CARD_OWNER = new_owner
+    clear_state(ADMIN_ID)
+    bot.send_message(msg.chat.id, f"✅ نام صاحب کارت با موفقیت تغییر یافت!\n\nنام جدید: <b>{CARD_OWNER}</b>")
+
+# ── تنظیمات محصولات ──────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_products" and c.from_user.id == ADMIN_ID)
+def cb_ap_products(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("📋 لیست محصولات", callback_data="ap_product_list"),
+        types.InlineKeyboardButton("➕ اضافه کردن محصول", callback_data="ap_product_add"),
+        types.InlineKeyboardButton("🔙 تنظیمات", callback_data="ap_settings"),
+    )
+    bot.send_message(
+        call.message.chat.id,
+        "📦 <b>تنظیمات محصولات</b>\n\n"
+        "👇 گزینه مورد نظر را انتخاب کنید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_product_list" and c.from_user.id == ADMIN_ID)
+def cb_ap_product_list(call):
+    bot.answer_callback_query(call.id)
+    reload_plans()
+    with get_db() as conn:
+        products = conn.execute("SELECT * FROM products ORDER BY price").fetchall()
+
+    if not products:
+        return bot.send_message(call.message.chat.id, "❌ هیچ محصولی ثبت نشده.")
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for p in products:
+        status = "✅" if p["active"] else "❌"
+        kb.add(types.InlineKeyboardButton(
+            f"{status} {p['gb']}GB — {p['days']} روز — {fmt(p['price'])} تومان",
+            callback_data=f"ap_prod_{p['id']}"
+        ))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات محصولات", callback_data="ap_products"))
+
+    bot.send_message(
+        call.message.chat.id,
+        "📋 <b>لیست محصولات</b>\n\n"
+        "روی هر محصول بزنید تا قیمت آن را تغییر دهید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_prod_") and c.from_user.id == ADMIN_ID)
+def cb_ap_prod_detail(call):
+    bot.answer_callback_query(call.id)
+    prod_id = int(call.data[8:])
+    with get_db() as conn:
+        p = conn.execute("SELECT * FROM products WHERE id=?", (prod_id,)).fetchone()
+    if not p:
+        return bot.send_message(call.message.chat.id, "❌ محصول یافت نشد.")
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("💰 تغییر قیمت", callback_data=f"ap_chprice_{prod_id}"),
+        types.InlineKeyboardButton("🔙 لیست محصولات", callback_data="ap_product_list"),
+    )
+    bot.send_message(
+        call.message.chat.id,
+        f"📦 <b>جزئیات محصول</b>\n\n"
+        f"🔑 کلید: <code>{p['plan_key']}</code>\n"
+        f"📊 حجم: <b>{p['gb']} گیگابایت</b>\n"
+        f"📅 مدت: <b>{p['days']} روز</b>\n"
+        f"💰 قیمت: <b>{fmt(p['price'])} تومان</b>\n"
+        f"📌 وضعیت: {'✅ فعال' if p['active'] else '❌ غیرفعال'}\n\n"
+        "👇 عملیات مورد نظر را انتخاب کنید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_chprice_") and c.from_user.id == ADMIN_ID)
+def cb_ap_change_price(call):
+    bot.answer_callback_query(call.id)
+    prod_id = int(call.data[11:])
+    set_state(ADMIN_ID, step="adm_change_price", prod_id=prod_id)
+    with get_db() as conn:
+        p = conn.execute("SELECT * FROM products WHERE id=?", (prod_id,)).fetchone()
+    bot.send_message(
+        call.message.chat.id,
+        f"💰 <b>تغییر قیمت محصول</b>\n\n"
+        f"📦 محصول: <b>{p['gb']}GB — {p['days']} روز</b>\n"
+        f"💰 قیمت فعلی: <b>{fmt(p['price'])} تومان</b>\n\n"
+        "👇 قیمت جدید را به تومان وارد کنید:"
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_change_price")
+def adm_change_price(msg):
+    try:
+        new_price = int((msg.text or "").strip().replace(",", "").replace("٬", ""))
+        if new_price <= 0:
+            raise ValueError
+    except ValueError:
+        return bot.send_message(msg.chat.id, "⚠️ قیمت معتبر وارد کنید (عدد مثبت).")
+
+    prod_id = get_state(ADMIN_ID)["prod_id"]
+    with get_db() as conn:
+        p = conn.execute("SELECT * FROM products WHERE id=?", (prod_id,)).fetchone()
+        new_label = f"{'⚡' if p['gb'] == 1 else '🚀' if p['gb'] == 2 else '🔥' if p['gb'] == 3 else '💥'} {p['gb']}GB  —  {p['days']} روز  —  {fmt(new_price)} تومان"
+        conn.execute("UPDATE products SET price=?, label=? WHERE id=?", (new_price, new_label, prod_id))
+        conn.commit()
+    reload_plans()
+    clear_state(ADMIN_ID)
+    bot.send_message(
+        msg.chat.id,
+        f"✅ قیمت محصول با موفقیت تغییر یافت!\n\nقیمت جدید: <b>{fmt(new_price)} تومان</b>"
+    )
+
+# ── اضافه کردن محصول ─────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_product_add" and c.from_user.id == ADMIN_ID)
+def cb_ap_product_add(call):
+    bot.answer_callback_query(call.id)
+    set_state(ADMIN_ID, step="adm_add_product_gb")
+    bot.send_message(
+        call.message.chat.id,
+        "➕ <b>اضافه کردن محصول جدید</b>\n\n"
+        "📊 <b>حجم محصول را وارد کنید (گیگابایت):</b>\n\n"
+        "مثال: ۵ یا 10"
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_add_product_gb")
+def adm_add_product_gb(msg):
+    try:
+        gb = int((msg.text or "").strip())
+        if gb <= 0:
+            raise ValueError
+    except ValueError:
+        return bot.send_message(msg.chat.id, "⚠️ عدد معتبر وارد کنید (مثال: 5).")
+    set_state(ADMIN_ID, step="adm_add_product_days", new_gb=gb)
+    bot.send_message(
+        msg.chat.id,
+        f"✅ حجم: <b>{gb} گیگابایت</b>\n\n"
+        "📅 <b>زمان محصول را وارد کنید (روز):</b>\n\n"
+        "مثال: 30"
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_add_product_days")
+def adm_add_product_days(msg):
+    try:
+        days = int((msg.text or "").strip())
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        return bot.send_message(msg.chat.id, "⚠️ عدد معتبر وارد کنید (مثال: 30).")
+    set_state(ADMIN_ID, step="adm_add_product_price", new_days=days)
+    bot.send_message(
+        msg.chat.id,
+        f"✅ زمان: <b>{days} روز</b>\n\n"
+        "💰 <b>قیمت محصول را به تومان وارد کنید:</b>\n\n"
+        "مثال: 500000"
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_add_product_price")
+def adm_add_product_price(msg):
+    try:
+        price = int((msg.text or "").strip().replace(",", "").replace("٬", ""))
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        return bot.send_message(msg.chat.id, "⚠️ قیمت معتبر وارد کنید.")
+
+    state = get_state(ADMIN_ID)
+    gb    = state["new_gb"]
+    days  = state["new_days"]
+
+    icons = {1: "⚡", 2: "🚀", 3: "🔥", 5: "💥"}
+    icon  = icons.get(gb, "📦")
+    label = f"{icon} {gb}GB  —  {days} روز  —  {fmt(price)} تومان"
+
+    import time
+    plan_key = f"prod_{int(time.time())}"
+
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO products(plan_key,label,gb,days,price) VALUES(?,?,?,?,?)",
+            (plan_key, label, gb, days, price)
+        )
+        conn.commit()
+
+    reload_plans()
+    clear_state(ADMIN_ID)
+    bot.send_message(
+        msg.chat.id,
+        f"✅ <b>محصول با موفقیت اضافه شد!</b> 🎉\n\n"
+        f"📊 حجم: <b>{gb} گیگابایت</b>\n"
+        f"📅 مدت: <b>{days} روز</b>\n"
+        f"💰 قیمت: <b>{fmt(price)} تومان</b>"
+    )
+
+# ─────────────────────────────────────────────
+#  ADMIN: USER MANAGEMENT
+# ─────────────────────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data == "ap_stats" and c.from_user.id == ADMIN_ID)
 def cb_ap_stats(call):
     bot.answer_callback_query(call.id)
@@ -1203,6 +1833,8 @@ def cb_ap_pending(call):
 # ─────────────────────────────────────────────
 @bot.message_handler(content_types=["text"], func=lambda m: True)
 def fallback(msg):
+    if is_offline_for(msg.from_user.id):
+        return bot.send_message(msg.chat.id, OFFLINE_MSG)
     u = get_user(msg.from_user.id)
     if u and u["is_banned"]:
         return
@@ -1218,7 +1850,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/health")
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "bot_online": BOT_ONLINE})
 
 @flask_app.route("/")
 def index():
