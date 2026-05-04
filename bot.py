@@ -675,60 +675,58 @@ def _deliver_configs(order_id, configs, subs):
             conn.execute("UPDATE order_services SET config_text=?, sub_link=? WHERE id=?", (cfg, sub, svc["id"]))
             conn.commit()
 
-        rename_kb = types.InlineKeyboardMarkup()
-        rename_kb.add(types.InlineKeyboardButton("✏️ تغییر نام سرویس", callback_data=f"rename_{svc['id']}"))
+        activation_time = datetime.now().strftime("%Y/%m/%d — %H:%M")
 
-        msg_text = (
-            f"🎉 <b>سرویس شما آماده است!</b> 🚀\n\n"
+        # ── Inline keyboard: sub-link button + rename ──
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        if sub:
+            kb.add(types.InlineKeyboardButton("🔗 باز کردن ساب‌لینک", url=sub))
+        kb.add(types.InlineKeyboardButton("✏️ تغییر نام سرویس", callback_data=f"rename_{svc['id']}"))
+
+        # ── Build caption (Telegram max: 1024 chars) ──
+        header = (
+            f"🎉 <b>سرویس شما با موفقیت فعال شد!</b> 🚀\n\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
             f"🏷️ <b>نام سرویس:</b> {svc['service_name']}\n"
             f"📊 <b>حجم:</b> {plan['gb']} گیگابایت\n"
-            f"📅 <b>مدت اعتبار:</b> {plan['days']} روز\n\n"
-            "🔐 <b>کانفیگ اتصال:</b>\n\n"
+            f"📅 <b>مدت اعتبار:</b> {plan['days']} روز\n"
+            f"🕐 <b>زمان فعال‌سازی:</b> {activation_time}\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"🔐 <b>کانفیگ اتصال</b> (روی آن بزنید تا کپی شود):\n\n"
             f"<code>{cfg}</code>\n\n"
         )
-        if sub:
-            msg_text += f"🔗 <b>ساب‌لینک:</b>\n<code>{sub}</code>\n\n"
-
-        msg_text += (
-            "📌 <b>راهنمای استفاده:</b>\n"
-            "کد بالا را کپی کرده و در اپلیکیشن مورد نظر ایمپورت کنید.\n\n"
-            f"❓ نیاز به راهنمایی؟ @{SUPPORT_USERNAME}\n\n"
+        footer = (
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📷 <b>QR کد:</b> برای اتصال سریع کد بالا را با اپلیکیشن اسکن کنید.\n\n"
+            "📌 <b>راهنما:</b>\n"
+            "  ۱. کانفیگ بالا را کپی کرده در اپ ایمپورت کنید\n"
+            "  ۲. یا دکمه ساب‌لینک را بزنید\n"
+            "  ۳. یا QR کد را با اپ اسکن کنید\n\n"
+            f"🆘 پشتیبانی: @{SUPPORT_USERNAME}\n"
             "💙 از خرید شما سپاسگزاریم!"
         )
 
-        # Build full caption for QR photo (max 1024 chars for Telegram captions)
-        caption = (
-            f"🎉 <b>سرویس شما فعال شد!</b> 🚀\n\n"
-            f"🏷️ <b>نام سرویس:</b> {svc['service_name']}\n"
-            f"📊 <b>حجم:</b> {plan['gb']} گیگابایت\n"
-            f"📅 <b>مدت اعتبار:</b> {plan['days']} روز\n\n"
-            f"🔐 <b>کانفیگ اتصال:</b>\n<code>{cfg}</code>\n\n"
-        )
-        if sub:
-            caption += f"🔗 <b>ساب‌لینک:</b>\n<code>{sub}</code>\n\n"
+        caption = header + footer
 
-        caption += (
-            "📷 <b>QR کد بالا را اسکن کنید</b> تا کانفیگ به صورت خودکار وارد اپلیکیشن شود.\n\n"
-            "📌 <b>راهنمای استفاده:</b>\n"
-            "  ۱. کانفیگ را کپی و در اپ ایمپورت کنید\n"
-            "  ۲. یا QR کد را با اپ اسکن کنید\n\n"
-            f"❓ پشتیبانی: @{SUPPORT_USERNAME}\n"
-            "💙 از خرید شما سپاسگزاریم!"
-        )
-
-        # Telegram caption limit is 1024 chars — truncate if needed
+        # If caption is too long (config is very long), keep header and shorten
         if len(caption) > 1024:
-            caption = caption[:1020] + "..."
+            short_footer = (
+                "\n━━━━━━━━━━━━━━━━━━\n"
+                "📷 QR کد را اسکن کنید یا دکمه ساب‌لینک را بزنید.\n"
+                f"🆘 @{SUPPORT_USERNAME}"
+            )
+            max_header = 1024 - len(short_footer)
+            caption = header[:max_header] + short_footer
 
-        # Generate QR (prefer sub-link, fallback to config)
+        # ── Generate QR code (prefer sub-link, fallback to config) ──
         qr_target = sub if sub else cfg
         try:
             qr_buf = make_qr_bytes(qr_target)
-            bot.send_photo(user_id, qr_buf, caption=caption, reply_markup=rename_kb)
+            bot.send_photo(user_id, qr_buf, caption=caption, reply_markup=kb)
         except Exception as e:
             print(f"QR generation error: {e}")
-            # Fallback: send text if QR fails
-            bot.send_message(user_id, msg_text, reply_markup=rename_kb)
+            # Fallback: plain text message
+            bot.send_message(user_id, caption, reply_markup=kb)
 
     with get_db() as conn:
         conn.execute("UPDATE orders SET status='delivered' WHERE id=?", (order_id,))
