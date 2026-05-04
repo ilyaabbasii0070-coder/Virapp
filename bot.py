@@ -3,11 +3,24 @@ import sqlite3
 import random
 import string
 import threading
+import io
 from datetime import datetime
 
 import telebot
 from telebot import types
 from flask import Flask, jsonify
+import qrcode
+from qrcode.image.pure import PyPNGImage
+
+def make_qr_bytes(text: str) -> io.BytesIO:
+    qr  = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
+    qr.add_data(text)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
 
 # ─────────────────────────────────────────────
 #  ENV
@@ -501,12 +514,16 @@ def _create_order_and_notify(user_id, chat_id, state, payment_method):
             "👇 تصویر رسید واریزی خود را ارسال کنید:"
         )
 
-# ── User sends receipt for PURCHASE ───────────
-@bot.message_handler(
-    content_types=["photo"],
-    func=lambda m: get_state(m.from_user.id).get("step") == "shop_receipt_wait"
-)
-def shop_receipt(msg):
+# ── Unified photo handler (func= filter unreliable for photos in some telebot versions)
+@bot.message_handler(content_types=["photo"])
+def handle_all_photos(msg):
+    step = get_state(msg.from_user.id).get("step")
+    if step == "shop_receipt_wait":
+        _handle_shop_receipt(msg)
+    elif step == "wallet_receipt":
+        _handle_wallet_receipt(msg)
+
+def _handle_shop_receipt(msg):
     state    = get_state(msg.from_user.id)
     order_id = state.get("order_id")
     if not order_id:
@@ -679,7 +696,20 @@ def _deliver_configs(order_id, configs, subs):
             "💙 از خرید شما سپاسگزاریم!"
         )
 
+        # Send text + rename button
         bot.send_message(user_id, msg_text, reply_markup=rename_kb)
+
+        # Generate and send QR code for config
+        qr_target = sub if sub else cfg
+        try:
+            qr_buf = make_qr_bytes(qr_target)
+            qr_caption = (
+                f"📷 <b>کیوآر کد سرویس:</b> {svc['service_name']}\n\n"
+                "این کد را با دوربین یا اپلیکیشن V2Ray اسکن کنید تا کانفیگ به صورت خودکار وارد شود. 📱✨"
+            )
+            bot.send_photo(user_id, qr_buf, caption=qr_caption)
+        except Exception as e:
+            print(f"QR generation error: {e}")
 
     with get_db() as conn:
         conn.execute("UPDATE orders SET status='delivered' WHERE id=?", (order_id,))
@@ -830,11 +860,7 @@ def wallet_amount(msg):
         "👇 تصویر رسید را ارسال کنید:"
     )
 
-@bot.message_handler(
-    content_types=["photo"],
-    func=lambda m: get_state(m.from_user.id).get("step") == "wallet_receipt"
-)
-def wallet_receipt(msg):
+def _handle_wallet_receipt(msg):
     state   = get_state(msg.from_user.id)
     amount  = state["wallet_amount"]
     file_id = msg.photo[-1].file_id
