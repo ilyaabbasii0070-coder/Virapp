@@ -9,18 +9,25 @@ from datetime import datetime
 import telebot
 from telebot import types
 from flask import Flask, jsonify
-import qrcode
-from qrcode.image.pure import PyPNGImage
 
-def make_qr_bytes(text: str) -> io.BytesIO:
-    qr  = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
-    qr.add_data(text)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
+try:
+    import qrcode
+    QR_OK = True
+except ImportError:
+    QR_OK = False
+
+def make_qr_bytes(text: str) -> io.BytesIO | None:
+    if not QR_OK:
+        return None
+    try:
+        img = qrcode.make(text)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        print(f"QR build error: {e}")
+        return None
 
 # ─────────────────────────────────────────────
 #  ENV
@@ -683,50 +690,42 @@ def _deliver_configs(order_id, configs, subs):
             kb.add(types.InlineKeyboardButton("🔗 باز کردن ساب‌لینک", url=sub))
         kb.add(types.InlineKeyboardButton("✏️ تغییر نام سرویس", callback_data=f"rename_{svc['id']}"))
 
-        # ── Build caption (Telegram max: 1024 chars) ──
-        header = (
+        # ── Full text message (always sent — no size limit) ──
+        full_text = (
             f"🎉 <b>سرویس شما با موفقیت فعال شد!</b> 🚀\n\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
             f"🏷️ <b>نام سرویس:</b> {svc['service_name']}\n"
             f"📊 <b>حجم:</b> {plan['gb']} گیگابایت\n"
             f"📅 <b>مدت اعتبار:</b> {plan['days']} روز\n"
-            f"🕐 <b>زمان فعال‌سازی:</b> {activation_time}\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"🕐 <b>زمان فعال‌سازی:</b> {activation_time}\n\n"
             f"🔐 <b>کانفیگ اتصال</b> (روی آن بزنید تا کپی شود):\n\n"
             f"<code>{cfg}</code>\n\n"
         )
-        footer = (
-            "━━━━━━━━━━━━━━━━━━\n"
-            "📷 <b>QR کد:</b> برای اتصال سریع کد بالا را با اپلیکیشن اسکن کنید.\n\n"
-            "📌 <b>راهنما:</b>\n"
+        if sub:
+            full_text += f"🔗 <b>ساب‌لینک:</b>\n<code>{sub}</code>\n\n"
+        full_text += (
+            "📌 <b>راهنمای استفاده:</b>\n"
             "  ۱. کانفیگ بالا را کپی کرده در اپ ایمپورت کنید\n"
-            "  ۲. یا دکمه ساب‌لینک را بزنید\n"
-            "  ۳. یا QR کد را با اپ اسکن کنید\n\n"
+            "  ۲. یا دکمه ساب‌لینک زیر را بزنید\n"
+            "  ۳. یا QR کد پایین را با اپ اسکن کنید\n\n"
             f"🆘 پشتیبانی: @{SUPPORT_USERNAME}\n"
             "💙 از خرید شما سپاسگزاریم!"
         )
 
-        caption = header + footer
+        # ── STEP 1: Always send full text message first ──
+        bot.send_message(user_id, full_text, reply_markup=kb)
 
-        # If caption is too long (config is very long), keep header and shorten
-        if len(caption) > 1024:
-            short_footer = (
-                "\n━━━━━━━━━━━━━━━━━━\n"
-                "📷 QR کد را اسکن کنید یا دکمه ساب‌لینک را بزنید.\n"
-                f"🆘 @{SUPPORT_USERNAME}"
-            )
-            max_header = 1024 - len(short_footer)
-            caption = header[:max_header] + short_footer
-
-        # ── Generate QR code (prefer sub-link, fallback to config) ──
+        # ── STEP 2: Try to send QR code as a separate photo ──
         qr_target = sub if sub else cfg
-        try:
-            qr_buf = make_qr_bytes(qr_target)
-            bot.send_photo(user_id, qr_buf, caption=caption, reply_markup=kb)
-        except Exception as e:
-            print(f"QR generation error: {e}")
-            # Fallback: plain text message
-            bot.send_message(user_id, caption, reply_markup=kb)
+        qr_buf = make_qr_bytes(qr_target)
+        if qr_buf:
+            qr_caption = (
+                f"📷 <b>QR کد سرویس {svc['service_name']}</b>\n\n"
+                "این کد را با دوربین یا اپلیکیشن V2Ray/Hiddify اسکن کنید تا کانفیگ به صورت خودکار وارد شود. 📱✨"
+            )
+            try:
+                bot.send_photo(user_id, qr_buf, caption=qr_caption)
+            except Exception as e:
+                print(f"QR send error: {e}")
 
     with get_db() as conn:
         conn.execute("UPDATE orders SET status='delivered' WHERE id=?", (order_id,))
