@@ -4,6 +4,7 @@ import random
 import string
 import threading
 import io
+import html as html_lib
 from datetime import datetime
 
 import telebot
@@ -671,37 +672,54 @@ def _deliver_configs(order_id, configs, subs):
         order    = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
         svc_rows = conn.execute("SELECT * FROM order_services WHERE order_id=? ORDER BY id", (order_id,)).fetchall()
 
-    plan    = PLANS[order["plan_key"]]
+    if not order or not svc_rows:
+        print(f"[deliver] ERROR: order or svc_rows missing for order_id={order_id}")
+        return
+
+    plan    = PLANS.get(order["plan_key"], {"gb": "?", "days": "?"})
     user_id = order["user_id"]
+    print(f"[deliver] order_id={order_id} user_id={user_id} svcs={len(svc_rows)} configs={len(configs)} subs={len(subs)}")
 
     for i, svc in enumerate(svc_rows):
         cfg = configs[i] if i < len(configs) else "---"
         sub = subs[i]    if i < len(subs)    else ""
 
-        with get_db() as conn:
-            conn.execute("UPDATE order_services SET config_text=?, sub_link=? WHERE id=?", (cfg, sub, svc["id"]))
-            conn.commit()
+        # ── Save to DB ──
+        try:
+            with get_db() as conn:
+                conn.execute("UPDATE order_services SET config_text=?, sub_link=? WHERE id=?",
+                             (cfg, sub, svc["id"]))
+                conn.commit()
+            print(f"[deliver] svc_id={svc['id']} DB updated ok")
+        except Exception as e:
+            print(f"[deliver] DB update ERROR svc_id={svc['id']}: {e}")
+            continue
 
         activation_time = datetime.now().strftime("%Y/%m/%d — %H:%M")
 
-        # ── Inline keyboard: sub-link button + rename ──
+        # ── Inline keyboard ──
+        # Only add URL button if sub is a valid http(s) URL (Telegram rejects others)
         kb = types.InlineKeyboardMarkup(row_width=1)
-        if sub:
+        sub_is_url = sub.startswith("http://") or sub.startswith("https://")
+        if sub_is_url:
             kb.add(types.InlineKeyboardButton("🔗 باز کردن ساب‌لینک", url=sub))
         kb.add(types.InlineKeyboardButton("✏️ تغییر نام سرویس", callback_data=f"rename_{svc['id']}"))
 
-        # ── Full text message (always sent — no size limit) ──
+        # ── Build text — HTML-escape config & sub to avoid parse errors ──
+        safe_cfg = html_lib.escape(cfg)
+        safe_sub = html_lib.escape(sub) if sub else ""
+
         full_text = (
             f"🎉 <b>سرویس شما با موفقیت فعال شد!</b> 🚀\n\n"
-            f"🏷️ <b>نام سرویس:</b> {svc['service_name']}\n"
+            f"🏷️ <b>نام سرویس:</b> {html_lib.escape(svc['service_name'])}\n"
             f"📊 <b>حجم:</b> {plan['gb']} گیگابایت\n"
             f"📅 <b>مدت اعتبار:</b> {plan['days']} روز\n"
             f"🕐 <b>زمان فعال‌سازی:</b> {activation_time}\n\n"
             f"🔐 <b>کانفیگ اتصال</b> (روی آن بزنید تا کپی شود):\n\n"
-            f"<code>{cfg}</code>\n\n"
+            f"<code>{safe_cfg}</code>\n\n"
         )
         if sub:
-            full_text += f"🔗 <b>ساب‌لینک:</b>\n<code>{sub}</code>\n\n"
+            full_text += f"🔗 <b>ساب‌لینک:</b>\n<code>{safe_sub}</code>\n\n"
         full_text += (
             "📌 <b>راهنمای استفاده:</b>\n"
             "  ۱. کانفیگ بالا را کپی کرده در اپ ایمپورت کنید\n"
@@ -711,21 +729,22 @@ def _deliver_configs(order_id, configs, subs):
             "💙 از خرید شما سپاسگزاریم!"
         )
 
-        # ── STEP 1: Always send full text message first ──
-        bot.send_message(user_id, full_text, reply_markup=kb)
+        # ── STEP 1: Send text message (always) ──
+        try:
+            bot.send_message(user_id, full_text, reply_markup=kb)
+            print(f"[deliver] text message sent to user_id={user_id}")
+        except Exception as e:
+            print(f"[deliver] send_message ERROR user_id={user_id}: {e}")
 
-        # ── STEP 2: Try to send QR code as a separate photo ──
+        # ── STEP 2: Send QR photo (best-effort) ──
         qr_target = sub if sub else cfg
         qr_buf = make_qr_bytes(qr_target)
         if qr_buf:
-            qr_caption = (
-                f"📷 <b>QR کد سرویس {svc['service_name']}</b>\n\n"
-                "این کد را با دوربین یا اپلیکیشن V2Ray/Hiddify اسکن کنید تا کانفیگ به صورت خودکار وارد شود. 📱✨"
-            )
             try:
-                bot.send_photo(user_id, qr_buf, caption=qr_caption)
+                bot.send_photo(user_id, qr_buf,
+                               caption=f"📷 QR کد سرویس <b>{html_lib.escape(svc['service_name'])}</b>\nبرای اتصال سریع اسکن کنید 📱")
             except Exception as e:
-                print(f"QR send error: {e}")
+                print(f"[deliver] QR send ERROR: {e}")
 
     with get_db() as conn:
         conn.execute("UPDATE orders SET status='delivered' WHERE id=?", (order_id,))
@@ -735,27 +754,35 @@ def _deliver_configs(order_id, configs, subs):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rename_"))
 def cb_rename(call):
     svc_id = int(call.data[7:])
+    caller_id = call.from_user.id
     with get_db() as conn:
-        svc = conn.execute("SELECT * FROM order_services WHERE id=? AND user_id=?", (svc_id, call.from_user.id)).fetchone()
-    if not svc:
+        # Lookup by id only first — compare user_id in Python to avoid type issues
+        svc = conn.execute("SELECT * FROM order_services WHERE id=?", (svc_id,)).fetchone()
+    print(f"[rename] caller={caller_id} svc_id={svc_id} found={svc is not None} svc_user={svc['user_id'] if svc else 'N/A'}")
+    if not svc or int(svc["user_id"]) != int(caller_id):
         return bot.answer_callback_query(call.id, "سرویس یافت نشد", show_alert=True)
     bot.answer_callback_query(call.id)
-    set_state(call.from_user.id, step="rename_service", svc_id=svc_id)
+    set_state(caller_id, step="rename_service", svc_id=svc_id)
     bot.send_message(
         call.message.chat.id,
         f"✏️ <b>تغییر نام سرویس</b>\n\n"
-        f"نام فعلی: <b>{svc['service_name']}</b>\n\n"
-        "👇 نام جدید را وارد کنید:"
+        f"نام فعلی: <b>{html_lib.escape(svc['service_name'])}</b>\n\n"
+        "👇 نام جدید را وارد کنید (حداکثر ۳۰ کاراکتر):"
     )
 
 @bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "rename_service")
 def rename_service(msg):
     state  = get_state(msg.from_user.id)
-    svc_id = state["svc_id"]
-    name   = msg.text.strip()[:30]
+    svc_id = state.get("svc_id")
+    if not svc_id:
+        clear_state(msg.from_user.id)
+        return
+    name = (msg.text or "").strip()[:30]
+    if not name:
+        return bot.send_message(msg.chat.id, "⚠️ نام نمی‌تواند خالی باشد.")
     with get_db() as conn:
         svc = conn.execute("SELECT user_id FROM order_services WHERE id=?", (svc_id,)).fetchone()
-        if not svc or svc["user_id"] != msg.from_user.id:
+        if not svc or int(svc["user_id"]) != int(msg.from_user.id):
             clear_state(msg.from_user.id)
             return bot.send_message(msg.chat.id, "❌ دسترسی ندارید.")
         conn.execute("UPDATE order_services SET service_name=? WHERE id=?", (name, svc_id))
@@ -768,10 +795,12 @@ def rename_service(msg):
 # ─────────────────────────────────────────────
 def _show_my_services(chat_id, user_id):
     with get_db() as conn:
-        svcs = conn.execute(
-            "SELECT * FROM order_services WHERE user_id=? AND config_text IS NOT NULL ORDER BY id DESC",
-            (user_id,)
+        # Cast both sides to int in Python to avoid any type mismatch
+        all_svcs = conn.execute(
+            "SELECT * FROM order_services WHERE config_text IS NOT NULL ORDER BY id DESC"
         ).fetchall()
+    svcs = [s for s in all_svcs if int(s["user_id"]) == int(user_id)]
+    print(f"[my_services] user_id={user_id} total_with_config={len(all_svcs)} user_svcs={len(svcs)}")
 
     if not svcs:
         return bot.send_message(
