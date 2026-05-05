@@ -101,14 +101,18 @@ def init_db():
 
         cnt = conn.execute("SELECT COUNT(*) as c FROM products").fetchone()["c"]
         if cnt == 0:
-            defaults = [
-                ("1gb", 1, 30, 400_000),
-                ("2gb", 2, 30, 780_000),
-                ("3gb", 3, 30, 1_100_000),
-                ("5gb", 5, 30, 1_800_000),
+            planets = [
+                ("pluto",    "🌸 پلوتو",    2,  30,  504_000),
+                ("jupiter",  "🎁 مشتری",    3,  30,  720_000),
+                ("saturn",   "🔱 زحل",      4,  30,  945_000),
+                ("venus",    "🏄 زهره",     5,  30, 1_143_000),
+                ("earth",    "🌎 زمین",     6,  30, 1_395_000),
+                ("neptune",  "🚀 نپتون",    7,  30, 1_665_000),
+                ("mars",     "🎁 مریخ",     8,  30, 1_890_000),
+                ("uranus",   "🎁 اورانوس", 10,  30, 1_980_000),
+                ("mercury2", "🔱 عطارد ۲", 20,  30, 3_600_000),
             ]
-            for key, gb, days, price in defaults:
-                lbl = _make_label(gb, days, price)
+            for key, lbl, gb, days, price in planets:
                 conn.execute("INSERT OR IGNORE INTO products(plan_key,label,gb,days,price) VALUES(?,?,?,?,?)", (key, lbl, gb, days, price))
             conn.commit()
 
@@ -287,10 +291,13 @@ def is_offline_for(uid): return not BOT_ONLINE and uid != ADMIN_ID
 # ── Main Menu ──────────────────────────────────
 def main_menu_kb(user_id):
     kb = types.InlineKeyboardMarkup(row_width=2)
+    # ردیف اول: فروشگاه + پنل کاربری (آبی WebApp)
+    shop_btn = types.InlineKeyboardButton("🛒 فروشگاه", callback_data="menu_shop")
     if WEBAPP_URL:
-        kb.add(types.InlineKeyboardButton("🛒 فروشگاه", web_app=types.WebAppInfo(url=WEBAPP_URL + "/shop")))
+        panel_btn = types.InlineKeyboardButton("🌐 پنل کاربری", web_app=types.WebAppInfo(url=WEBAPP_URL + "/panel"))
+        kb.add(shop_btn, panel_btn)
     else:
-        kb.add(types.InlineKeyboardButton("🛒 فروشگاه", callback_data="menu_shop"))
+        kb.add(shop_btn)
     kb.add(
         types.InlineKeyboardButton("👤 حساب کاربری", callback_data="menu_account"),
         types.InlineKeyboardButton("💰 کیف پول",    callback_data="menu_wallet"),
@@ -301,14 +308,11 @@ def main_menu_kb(user_id):
     )
     kb.add(types.InlineKeyboardButton("🆘 پشتیبانی", url=f"https://t.me/{SUPPORT_USERNAME}"))
     if user_id == ADMIN_ID:
-        if WEBAPP_URL:
-            kb.add(types.InlineKeyboardButton("⚙️ پنل مدیریت", web_app=types.WebAppInfo(url=WEBAPP_URL + "/admin")))
-        else:
-            kb.add(types.InlineKeyboardButton("⚙️ پنل ادمین", callback_data="menu_admin"))
         kb.add(
             types.InlineKeyboardButton("🔴 خاموش", callback_data="admin_bot_off"),
             types.InlineKeyboardButton("🟢 روشن",  callback_data="admin_bot_on"),
         )
+        kb.add(types.InlineKeyboardButton("⚙️ پنل ادمین (چت)", callback_data="menu_admin"))
     return kb
 
 def send_main_menu(chat_id, user_id, text=None):
@@ -442,13 +446,26 @@ def _show_account(chat_id, user_id):
 # ─────────────────────────────────────────────
 #  🛒 SHOP
 # ─────────────────────────────────────────────
+def _fmt_price_short(price):
+    """504000 → ◄504 T"""
+    t = price // 1000
+    return f"◄{t:,} T"
+
 def _show_shop(chat_id, user_id):
     reload_plans()
     if not PLANS: return bot.send_message(chat_id, "❌ هیچ محصولی موجود نیست.")
     set_state(user_id, step="shop_plan")
-    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb = types.InlineKeyboardMarkup(row_width=3)
     for key, plan in PLANS.items():
-        kb.add(types.InlineKeyboardButton(plan["label"], callback_data=f"plan_{key}"))
+        gb_txt    = f"📦 {plan['gb']} گیگ"
+        price_txt = _fmt_price_short(plan["price"])
+        kb.row(
+            types.InlineKeyboardButton(plan["label"],  callback_data=f"plan_{key}"),
+            types.InlineKeyboardButton(gb_txt,         callback_data=f"plan_{key}"),
+            types.InlineKeyboardButton(price_txt,      callback_data=f"plan_{key}"),
+        )
+    if WEBAPP_URL:
+        kb.add(types.InlineKeyboardButton("🌐 خرید از پنل کاربری", web_app=types.WebAppInfo(url=WEBAPP_URL + "/panel")))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
     bot.send_message(chat_id,
         "🛒 <b>فروشگاه ویرا نت</b>\n\n"
@@ -1464,7 +1481,7 @@ def fallback(msg):
 # ─────────────────────────────────────────────
 #  WEBAPP HTML
 # ─────────────────────────────────────────────
-WEBAPP_HTML = r"""<!DOCTYPE html>
+WEBAPP_HTML = """<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="UTF-8">
@@ -1473,134 +1490,201 @@ WEBAPP_HTML = r"""<!DOCTYPE html>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
-body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0d1b2a;color:#e8f4fd;min-height:100vh;direction:rtl;}
+body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0a1628;color:#e8f4fd;min-height:100vh;direction:rtl;}
 .screen{display:none;min-height:100vh;}
 .screen.active{display:block;}
 
-/* Locked user screen */
-#user-locked{background:linear-gradient(135deg,#0d1b2a 0%,#1a3a5c 50%,#0d2b45 100%);display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:2rem;}
-.lock-icon{font-size:5rem;margin-bottom:1.5rem;animation:pulse 2s infinite;}
-@keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.05);}}`
-.lock-title{font-size:1.6rem;font-weight:700;color:#4fc3f7;margin-bottom:1rem;}
-.lock-sub{font-size:1rem;color:#90caf9;line-height:1.6;}
-.info-card{background:rgba(255,255,255,0.05);border:1px solid rgba(79,195,247,0.2);border-radius:16px;padding:1.5rem;margin-top:2rem;width:100%;max-width:340px;}
-.info-row{display:flex;justify-content:space-between;align-items:center;padding:.6rem 0;border-bottom:1px solid rgba(255,255,255,0.05);}
-.info-row:last-child{border-bottom:none;}
-.info-label{color:#90caf9;font-size:.9rem;}
-.info-value{font-weight:600;color:#4fc3f7;}
+/* ── User locked ── */
+#user-locked{
+  background:linear-gradient(160deg,#060e1f 0%,#0a2040 40%,#0d3060 70%,#0a2040 100%);
+  display:flex;flex-direction:column;align-items:center;justify-content:flex-start;
+  min-height:100vh;padding:2.5rem 1.5rem 2rem;overflow-y:auto;
+}
+.vn-logo{font-size:3.5rem;margin-bottom:.5rem;animation:float 3s ease-in-out infinite;}
+@keyframes float{0%,100%{transform:translateY(0);}50%{transform:translateY(-8px);}}
+.vn-brand{font-size:1.8rem;font-weight:800;background:linear-gradient(90deg,#4fc3f7,#81d4fa,#b3e5fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.3rem;}
+.vn-slogan{font-size:.9rem;color:#78909c;margin-bottom:2rem;letter-spacing:.03em;}
+.user-card{width:100%;max-width:360px;background:linear-gradient(135deg,rgba(79,195,247,.12),rgba(33,150,243,.08));border:1px solid rgba(79,195,247,.25);border-radius:20px;padding:1.5rem;margin-bottom:1.2rem;backdrop-filter:blur(10px);}
+.user-card-header{display:flex;align-items:center;gap:.8rem;margin-bottom:1.2rem;padding-bottom:1rem;border-bottom:1px solid rgba(79,195,247,.15);}
+.user-avatar{width:50px;height:50px;border-radius:50%;background:linear-gradient(135deg,#1565c0,#42a5f5);display:flex;align-items:center;justify-content:center;font-size:1.4rem;flex-shrink:0;}
+.user-card-name{font-size:1rem;font-weight:700;color:#e8f4fd;}
+.user-card-id{font-size:.8rem;color:#78909c;}
+.info-row{display:flex;justify-content:space-between;align-items:center;padding:.6rem 0;}
+.info-row+.info-row{border-top:1px solid rgba(255,255,255,.05);}
+.info-label{font-size:.85rem;color:#78909c;display:flex;align-items:center;gap:.4rem;}
+.info-value{font-size:.95rem;font-weight:700;color:#4fc3f7;}
+.feature-grid{display:grid;grid-template-columns:1fr 1fr;gap:.8rem;width:100%;max-width:360px;margin-top:.5rem;}
+.feature-box{background:rgba(255,255,255,.04);border:1px solid rgba(79,195,247,.1);border-radius:14px;padding:1rem;text-align:center;}
+.feature-icon{font-size:1.6rem;margin-bottom:.3rem;}
+.feature-label{font-size:.75rem;color:#90caf9;line-height:1.3;}
+.lock-notice{width:100%;max-width:360px;background:rgba(255,82,82,.08);border:1px solid rgba(255,82,82,.2);border-radius:14px;padding:1rem;text-align:center;margin-top:1rem;font-size:.85rem;color:#ef9a9a;}
 
-/* Admin panel */
-#admin-panel{background:#0d1b2a;}
-.nav{background:rgba(255,255,255,0.03);backdrop-filter:blur(10px);border-bottom:1px solid rgba(79,195,247,0.15);padding:.8rem 1rem;position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:.8rem;}
-.nav-title{font-size:1.1rem;font-weight:700;color:#4fc3f7;flex:1;}
-.nav-badge{background:#ff5252;color:#fff;border-radius:999px;padding:.1rem .5rem;font-size:.75rem;font-weight:700;}
-.tabs{display:flex;overflow-x:auto;padding:.5rem 1rem;gap:.5rem;scrollbar-width:none;}
+/* ── Admin panel ── */
+#admin-panel{background:#0a1628;display:flex;flex-direction:column;min-height:100vh;}
+.nav{background:rgba(10,22,40,.95);backdrop-filter:blur(12px);border-bottom:1px solid rgba(79,195,247,.12);padding:.9rem 1rem;position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:.7rem;}
+.nav-logo{font-size:1.3rem;}
+.nav-title{font-size:1rem;font-weight:700;color:#4fc3f7;flex:1;}
+.nav-badge{background:#ff5252;color:#fff;border-radius:999px;padding:.15rem .55rem;font-size:.72rem;font-weight:800;animation:badgePulse 1.5s infinite;}
+@keyframes badgePulse{0%,100%{box-shadow:0 0 0 0 rgba(255,82,82,.5);}50%{box-shadow:0 0 0 5px rgba(255,82,82,0);}}
+.tabs{display:flex;overflow-x:auto;padding:.6rem 1rem;gap:.5rem;scrollbar-width:none;border-bottom:1px solid rgba(79,195,247,.07);}
 .tabs::-webkit-scrollbar{display:none;}
-.tab{flex-shrink:0;padding:.5rem 1rem;border-radius:999px;border:1px solid rgba(79,195,247,0.3);background:transparent;color:#90caf9;font-size:.85rem;cursor:pointer;transition:all .2s;font-family:inherit;}
-.tab.active{background:#4fc3f7;color:#0d1b2a;font-weight:700;border-color:#4fc3f7;}
-.content{padding:1rem;}
+.tab{flex-shrink:0;padding:.45rem 1rem;border-radius:999px;border:1px solid rgba(79,195,247,.25);background:transparent;color:#78909c;font-size:.82rem;cursor:pointer;transition:all .2s;font-family:inherit;}
+.tab.active{background:linear-gradient(135deg,#1565c0,#1976d2);color:#fff;font-weight:700;border-color:#1976d2;box-shadow:0 2px 12px rgba(21,101,192,.35);}
+.content{padding:1rem;flex:1;overflow-y:auto;}
 
 /* Cards */
-.card{background:rgba(255,255,255,0.04);border:1px solid rgba(79,195,247,0.1);border-radius:16px;padding:1.2rem;margin-bottom:1rem;}
-.card-title{font-size:1rem;font-weight:700;color:#4fc3f7;margin-bottom:1rem;display:flex;align-items:center;gap:.5rem;}
+.card{background:rgba(255,255,255,.03);border:1px solid rgba(79,195,247,.1);border-radius:16px;padding:1.2rem;margin-bottom:1rem;backdrop-filter:blur(6px);}
+.card-title{font-size:.95rem;font-weight:700;color:#4fc3f7;margin-bottom:1rem;display:flex;align-items:center;gap:.5rem;}
 .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:.8rem;}
-.stat-box{background:rgba(79,195,247,0.08);border-radius:12px;padding:1rem;text-align:center;}
-.stat-num{font-size:1.8rem;font-weight:700;color:#4fc3f7;}
-.stat-lbl{font-size:.8rem;color:#90caf9;margin-top:.2rem;}
+.stat-box{background:linear-gradient(135deg,rgba(79,195,247,.07),rgba(33,150,243,.05));border:1px solid rgba(79,195,247,.12);border-radius:14px;padding:1.1rem;text-align:center;}
+.stat-num{font-size:1.9rem;font-weight:800;background:linear-gradient(135deg,#4fc3f7,#81d4fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.stat-lbl{font-size:.78rem;color:#78909c;margin-top:.3rem;}
 
 /* Receipts */
-.receipt-item{background:rgba(255,255,255,0.04);border:1px solid rgba(79,195,247,0.1);border-radius:12px;padding:1rem;margin-bottom:.8rem;}
-.receipt-header{display:flex;justify-content:space-between;margin-bottom:.5rem;}
-.receipt-user{font-weight:600;color:#4fc3f7;}
-.receipt-date{font-size:.8rem;color:#607d8b;}
-.receipt-type{font-size:.85rem;color:#90caf9;margin-bottom:.8rem;}
+.receipt-item{background:rgba(255,255,255,.03);border:1px solid rgba(79,195,247,.1);border-radius:14px;padding:1rem;margin-bottom:.8rem;transition:border-color .2s;}
+.receipt-item:hover{border-color:rgba(79,195,247,.25);}
+.receipt-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.5rem;}
+.receipt-user{font-weight:700;color:#4fc3f7;font-size:.95rem;}
+.receipt-date{font-size:.75rem;color:#455a64;background:rgba(255,255,255,.05);padding:.2rem .5rem;border-radius:6px;}
+.receipt-info{font-size:.82rem;color:#90caf9;margin-bottom:.8rem;line-height:1.5;}
+.receipt-amount{font-size:1rem;font-weight:700;color:#a5d6a7;margin-bottom:.8rem;}
 .btn-row{display:flex;gap:.6rem;}
-.btn{flex:1;padding:.6rem;border:none;border-radius:8px;font-size:.85rem;font-weight:700;cursor:pointer;font-family:inherit;transition:opacity .2s;}
-.btn:hover{opacity:.85;}
-.btn-approve{background:#00c853;color:#fff;}
-.btn-reject{background:#ff5252;color:#fff;}
-.btn-primary{background:#4fc3f7;color:#0d1b2a;}
-.btn-secondary{background:rgba(255,255,255,0.1);color:#e8f4fd;}
+.btn{flex:1;padding:.65rem;border:none;border-radius:10px;font-size:.85rem;font-weight:700;cursor:pointer;font-family:inherit;transition:all .2s;}
+.btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.3);}
+.btn:active{transform:translateY(0);}
+.btn-approve{background:linear-gradient(135deg,#00c853,#00e676);color:#fff;}
+.btn-reject{background:linear-gradient(135deg,#ff5252,#ff6e40);color:#fff;}
+.btn-primary{background:linear-gradient(135deg,#1565c0,#1976d2);color:#fff;}
 
 /* Config form */
-.config-form{display:none;}
+.config-form{display:none;margin-top:.8rem;padding-top:.8rem;border-top:1px solid rgba(79,195,247,.1);}
 .config-form.visible{display:block;}
-.form-label{font-size:.85rem;color:#90caf9;margin-bottom:.4rem;display:block;}
-.form-input{width:100%;background:rgba(255,255,255,0.05);border:1px solid rgba(79,195,247,0.2);border-radius:8px;padding:.7rem;color:#e8f4fd;font-size:.9rem;font-family:inherit;resize:vertical;min-height:60px;}
-.form-input:focus{outline:none;border-color:#4fc3f7;}
-.step-badge{background:rgba(79,195,247,0.15);color:#4fc3f7;border-radius:8px;padding:.4rem .8rem;font-size:.85rem;margin-bottom:.8rem;display:inline-block;}
+.step-badge{display:inline-flex;align-items:center;gap:.4rem;background:rgba(79,195,247,.12);border:1px solid rgba(79,195,247,.2);color:#4fc3f7;border-radius:10px;padding:.4rem .8rem;font-size:.82rem;font-weight:700;margin-bottom:.8rem;}
+.form-label{font-size:.82rem;color:#78909c;margin-bottom:.35rem;margin-top:.6rem;display:block;}
+.form-input{width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(79,195,247,.18);border-radius:10px;padding:.7rem;color:#e8f4fd;font-size:.88rem;font-family:inherit;resize:vertical;min-height:64px;transition:border-color .2s;}
+.form-input:focus{outline:none;border-color:#4fc3f7;background:rgba(79,195,247,.04);}
 
 /* Settings */
-.setting-row{padding:.8rem 0;border-bottom:1px solid rgba(255,255,255,0.05);}
-.setting-row:last-child{border-bottom:none;}
-.setting-label{font-size:.85rem;color:#90caf9;margin-bottom:.4rem;}
-.setting-value{display:flex;gap:.5rem;align-items:center;}
-.setting-input{flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(79,195,247,0.2);border-radius:8px;padding:.6rem;color:#e8f4fd;font-size:.9rem;font-family:inherit;}
+.setting-group{margin-bottom:.5rem;}
+.setting-label{font-size:.8rem;color:#78909c;margin-bottom:.4rem;font-weight:600;letter-spacing:.02em;}
+.setting-row{display:flex;gap:.5rem;align-items:center;}
+.setting-input{flex:1;background:rgba(255,255,255,.04);border:1px solid rgba(79,195,247,.15);border-radius:10px;padding:.65rem;color:#e8f4fd;font-size:.9rem;font-family:inherit;transition:border-color .2s;}
 .setting-input:focus{outline:none;border-color:#4fc3f7;}
-.btn-save{padding:.6rem 1rem;background:#4fc3f7;color:#0d1b2a;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-family:inherit;}
+.btn-save{padding:.65rem 1rem;background:linear-gradient(135deg,#1565c0,#1976d2);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:inherit;font-size:.85rem;white-space:nowrap;}
 
 /* Products */
-.product-item{background:rgba(255,255,255,0.04);border:1px solid rgba(79,195,247,0.1);border-radius:12px;padding:1rem;margin-bottom:.8rem;}
-.product-name{font-weight:600;margin-bottom:.6rem;}
-.product-meta{font-size:.8rem;color:#90caf9;margin-bottom:.8rem;}
-.edit-row{display:flex;gap:.5rem;margin-top:.5rem;}
-.edit-input{flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(79,195,247,0.2);border-radius:8px;padding:.5rem;color:#e8f4fd;font-size:.85rem;font-family:inherit;}
+.product-item{background:rgba(255,255,255,.03);border:1px solid rgba(79,195,247,.1);border-radius:14px;padding:1rem;margin-bottom:.8rem;}
+.product-header{font-size:1rem;font-weight:700;margin-bottom:.3rem;}
+.product-meta{font-size:.8rem;color:#78909c;margin-bottom:.8rem;}
+.edit-input{flex:1;background:rgba(255,255,255,.04);border:1px solid rgba(79,195,247,.15);border-radius:8px;padding:.5rem;color:#e8f4fd;font-size:.85rem;font-family:inherit;}
+.edit-row{display:flex;gap:.5rem;margin-bottom:.4rem;}
 
 /* AI chat */
-.chat-area{height:calc(100vh - 260px);overflow-y:auto;padding:.5rem;display:flex;flex-direction:column;gap:.8rem;}
-.msg{max-width:85%;border-radius:12px;padding:.8rem 1rem;font-size:.9rem;line-height:1.5;}
-.msg-user{background:#1565c0;color:#fff;align-self:flex-end;border-radius:12px 12px 4px 12px;}
-.msg-ai{background:rgba(79,195,247,0.12);border:1px solid rgba(79,195,247,0.2);align-self:flex-start;border-radius:12px 12px 12px 4px;}
-.msg-ai code{background:rgba(0,0,0,0.3);border-radius:4px;padding:.1rem .3rem;font-size:.85rem;}
-.msg-ai pre{background:rgba(0,0,0,0.3);border-radius:8px;padding:.8rem;overflow-x:auto;margin:.5rem 0;font-size:.8rem;}
-.chat-input-row{position:sticky;bottom:0;background:#0d1b2a;padding:.8rem;display:flex;gap:.5rem;border-top:1px solid rgba(79,195,247,0.1);}
-.chat-input{flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(79,195,247,0.2);border-radius:12px;padding:.7rem;color:#e8f4fd;font-size:.9rem;font-family:inherit;resize:none;min-height:44px;}
+#tab-ai{display:none;flex-direction:column;height:calc(100vh - 120px);}
+#tab-ai.visible{display:flex;}
+.ai-header{background:linear-gradient(135deg,rgba(21,101,192,.15),rgba(33,150,243,.1));border:1px solid rgba(79,195,247,.15);border-radius:14px;padding:1rem;margin-bottom:.8rem;}
+.ai-header-title{font-size:.95rem;font-weight:700;color:#4fc3f7;margin-bottom:.3rem;}
+.ai-header-sub{font-size:.8rem;color:#78909c;line-height:1.5;}
+.chat-area{flex:1;overflow-y:auto;padding:.5rem;display:flex;flex-direction:column;gap:.7rem;scroll-behavior:smooth;}
+.msg{max-width:88%;border-radius:14px;padding:.85rem 1rem;font-size:.88rem;line-height:1.6;}
+.msg-user{background:linear-gradient(135deg,#1565c0,#1976d2);color:#fff;align-self:flex-end;border-radius:14px 14px 4px 14px;box-shadow:0 2px 8px rgba(21,101,192,.3);}
+.msg-ai{background:rgba(255,255,255,.04);border:1px solid rgba(79,195,247,.15);align-self:flex-start;border-radius:14px 14px 14px 4px;}
+.msg-ai pre{background:rgba(0,0,0,.4);border-radius:8px;padding:.8rem;overflow-x:auto;margin:.6rem 0;font-size:.78rem;border:1px solid rgba(79,195,247,.1);}
+.msg-ai code{background:rgba(0,0,0,.3);border-radius:4px;padding:.1rem .3rem;font-size:.82rem;font-family:monospace;}
+.typing-dots{display:flex;gap:.3rem;align-items:center;padding:.5rem;}
+.typing-dots span{width:7px;height:7px;border-radius:50%;background:#4fc3f7;animation:dotBounce .9s infinite;}
+.typing-dots span:nth-child(2){animation-delay:.15s;}
+.typing-dots span:nth-child(3){animation-delay:.3s;}
+@keyframes dotBounce{0%,80%,100%{transform:scale(.6);opacity:.4;}40%{transform:scale(1);opacity:1;}}
+.chat-input-row{background:rgba(10,22,40,.95);padding:.8rem;display:flex;gap:.5rem;border-top:1px solid rgba(79,195,247,.1);position:sticky;bottom:0;}
+.chat-input{flex:1;background:rgba(255,255,255,.05);border:1px solid rgba(79,195,247,.2);border-radius:12px;padding:.7rem;color:#e8f4fd;font-size:.9rem;font-family:inherit;resize:none;min-height:44px;max-height:120px;}
 .chat-input:focus{outline:none;border-color:#4fc3f7;}
-.chat-send{background:#4fc3f7;border:none;border-radius:12px;width:44px;color:#0d1b2a;font-size:1.2rem;cursor:pointer;display:flex;align-items:center;justify-content:center;}
-.typing{color:#90caf9;font-size:.85rem;font-style:italic;}
+.chat-send{background:linear-gradient(135deg,#1565c0,#42a5f5);border:none;border-radius:12px;width:44px;height:44px;color:#fff;font-size:1.3rem;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .2s;}
+.chat-send:hover{opacity:.85;}
 
 /* Toast */
-.toast{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%) translateY(100px);background:#333;color:#fff;padding:.7rem 1.2rem;border-radius:999px;font-size:.9rem;transition:transform .3s;z-index:9999;}
+.toast{position:fixed;bottom:1.2rem;left:50%;transform:translateX(-50%) translateY(120px);background:rgba(33,33,33,.95);color:#fff;padding:.7rem 1.4rem;border-radius:999px;font-size:.88rem;transition:transform .3s cubic-bezier(.175,.885,.32,1.275);z-index:9999;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);}
 .toast.show{transform:translateX(-50%) translateY(0);}
 
 /* Loader */
-.loader{position:fixed;inset:0;background:#0d1b2a;display:flex;align-items:center;justify-content:center;z-index:9999;flex-direction:column;gap:1rem;}
-.spinner{width:48px;height:48px;border:4px solid rgba(79,195,247,0.2);border-top-color:#4fc3f7;border-radius:50%;animation:spin 1s linear infinite;}
+.loader{position:fixed;inset:0;background:#060e1f;display:flex;align-items:center;justify-content:center;z-index:9999;flex-direction:column;gap:1rem;}
+.spinner{width:48px;height:48px;border:3px solid rgba(79,195,247,.15);border-top-color:#4fc3f7;border-radius:50%;animation:spin 1s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
+@keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.04);}}
 </style>
 </head>
 <body>
 
 <div class="loader" id="loader">
   <div class="spinner"></div>
-  <div style="color:#4fc3f7;font-size:.9rem;">در حال بارگذاری...</div>
+  <div style="color:#4fc3f7;font-size:.88rem;letter-spacing:.05em;">ViraNet در حال بارگذاری...</div>
 </div>
 
-<!-- USER LOCKED -->
+<!-- USER PAGE (Blue locked) -->
 <div class="screen" id="user-locked">
-  <div class="lock-icon">🔐</div>
-  <div class="lock-title">ViraNet</div>
-  <div class="lock-sub">سرویس‌های اینترنتی پرسرعت</div>
-  <div class="info-card" id="user-info-card">
-    <div class="info-row"><span class="info-label">👤 نام</span><span class="info-value" id="u-name">---</span></div>
-    <div class="info-row"><span class="info-label">🆔 آیدی</span><span class="info-value" id="u-id">---</span></div>
-    <div class="info-row"><span class="info-label">💰 کیف پول</span><span class="info-value" id="u-wallet">---</span></div>
-    <div class="info-row"><span class="info-label">📦 سرویس‌ها</span><span class="info-value" id="u-svcs">---</span></div>
+  <div class="vn-logo">🌐</div>
+  <div class="vn-brand">ViraNet</div>
+  <div class="vn-slogan">سرویس‌های اینترنتی پرسرعت و امن</div>
+
+  <div class="user-card">
+    <div class="user-card-header">
+      <div class="user-avatar" id="u-avatar">👤</div>
+      <div>
+        <div class="user-card-name" id="u-name">در حال بارگذاری...</div>
+        <div class="user-card-id" id="u-id-text">شناسه: ---</div>
+      </div>
+    </div>
+    <div class="info-row">
+      <span class="info-label">💰 موجودی کیف پول</span>
+      <span class="info-value" id="u-wallet">---</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">📦 سرویس‌های فعال</span>
+      <span class="info-value" id="u-svcs">---</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">🆔 شناسه تلگرام</span>
+      <span class="info-value" id="u-id">---</span>
+    </div>
+  </div>
+
+  <div class="feature-grid">
+    <div class="feature-box">
+      <div class="feature-icon">⚡</div>
+      <div class="feature-label">سرعت نامحدود</div>
+    </div>
+    <div class="feature-box">
+      <div class="feature-icon">🛡️</div>
+      <div class="feature-label">امنیت کامل</div>
+    </div>
+    <div class="feature-box">
+      <div class="feature-icon">🔧</div>
+      <div class="feature-label">پشتیبانی ۲۴ ساعته</div>
+    </div>
+    <div class="feature-box">
+      <div class="feature-icon">🌍</div>
+      <div class="feature-label">سرورهای جهانی</div>
+    </div>
+  </div>
+
+  <div class="lock-notice">
+    🔒 برای خرید سرویس از ربات تلگرام استفاده کنید
   </div>
 </div>
 
 <!-- ADMIN PANEL -->
 <div class="screen" id="admin-panel">
   <div class="nav">
-    <div class="nav-title">⚙️ پنل مدیریت ViraNet</div>
-    <span class="nav-badge" id="pending-badge" style="display:none"></span>
+    <span class="nav-logo">⚙️</span>
+    <div class="nav-title">پنل مدیریت ViraNet</div>
+    <span class="nav-badge" id="pending-badge" style="display:none">0</span>
   </div>
   <div class="tabs">
-    <button class="tab active" onclick="switchTab('dashboard')">📊 داشبورد</button>
-    <button class="tab" onclick="switchTab('receipts')">📥 رسیدها</button>
-    <button class="tab" onclick="switchTab('settings')">⚙️ تنظیمات</button>
-    <button class="tab" onclick="switchTab('products')">📦 محصولات</button>
-    <button class="tab" onclick="switchTab('ai')">🤖 تغییرات ربات</button>
+    <button class="tab active" onclick="switchTab('dashboard',this)">📊 داشبورد</button>
+    <button class="tab" onclick="switchTab('receipts',this)">📥 رسیدها</button>
+    <button class="tab" onclick="switchTab('settings',this)">⚙️ تنظیمات</button>
+    <button class="tab" onclick="switchTab('products',this)">📦 محصولات</button>
+    <button class="tab" onclick="switchTab('ai',this)">🤖 تغییرات ربات</button>
   </div>
   <div class="content">
 
@@ -1611,48 +1695,50 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0d1b2a;color:#e8f4fd;m
         <div class="stat-grid">
           <div class="stat-box"><div class="stat-num" id="stat-users">-</div><div class="stat-lbl">👥 کاربران</div></div>
           <div class="stat-box"><div class="stat-num" id="stat-pending">-</div><div class="stat-lbl">📥 رسید معلق</div></div>
-          <div class="stat-box"><div class="stat-num" id="stat-revenue">-</div><div class="stat-lbl">💰 فروش (میلیون)</div></div>
+          <div class="stat-box"><div class="stat-num" id="stat-revenue">-</div><div class="stat-lbl">💰 فروش (M)</div></div>
           <div class="stat-box"><div class="stat-num" id="stat-orders">-</div><div class="stat-lbl">🛒 سفارش‌ها</div></div>
         </div>
       </div>
-      <div class="card" style="text-align:center;">
-        <div class="card-title">🟢 وضعیت ربات</div>
-        <div id="bot-status-text" style="font-size:1.1rem;margin-bottom:1rem;">در حال بارگذاری...</div>
-        <div style="display:flex;gap:.8rem;">
-          <button class="btn btn-reject" onclick="setBotStatus(false)">🔴 خاموش</button>
-          <button class="btn btn-approve" onclick="setBotStatus(true)">🟢 روشن</button>
+      <div class="card">
+        <div class="card-title">📡 وضعیت ربات</div>
+        <div style="text-align:center;font-size:1.15rem;font-weight:700;margin-bottom:1rem;" id="bot-status-text">در حال بارگذاری...</div>
+        <div style="display:flex;gap:.7rem;">
+          <button class="btn btn-reject" onclick="setBotStatus(false)">🔴 خاموش کردن</button>
+          <button class="btn btn-approve" onclick="setBotStatus(true)">🟢 روشن کردن</button>
         </div>
       </div>
     </div>
 
     <!-- Receipts -->
     <div id="tab-receipts" style="display:none;">
-      <div id="receipts-list"><div style="text-align:center;color:#607d8b;padding:2rem;">در حال بارگذاری...</div></div>
+      <div id="receipts-list"><div style="text-align:center;color:#455a64;padding:3rem 1rem;">در حال بارگذاری رسیدها...</div></div>
     </div>
 
     <!-- Settings -->
     <div id="tab-settings" style="display:none;">
       <div class="card">
         <div class="card-title">💳 اطلاعات پرداخت</div>
-        <div class="setting-row">
-          <div class="setting-label">شماره کارت</div>
-          <div class="setting-value">
-            <input class="setting-input" id="s-card" type="text" placeholder="شماره کارت">
-            <button class="btn-save" onclick="saveSetting('card_number','s-card')">ذخیره</button>
+        <div class="setting-group">
+          <div class="setting-label">شماره کارت بانکی</div>
+          <div class="setting-row">
+            <input class="setting-input" id="s-card" type="text" placeholder="مثال: 6037997812345678">
+            <button class="btn-save" onclick="saveSetting('card_number','s-card')">💾 ذخیره</button>
           </div>
         </div>
-        <div class="setting-row">
+        <div style="height:.8rem;"></div>
+        <div class="setting-group">
           <div class="setting-label">نام صاحب کارت</div>
-          <div class="setting-value">
-            <input class="setting-input" id="s-owner" type="text" placeholder="نام صاحب کارت">
-            <button class="btn-save" onclick="saveSetting('card_owner','s-owner')">ذخیره</button>
+          <div class="setting-row">
+            <input class="setting-input" id="s-owner" type="text" placeholder="مثال: علی احمدی">
+            <button class="btn-save" onclick="saveSetting('card_owner','s-owner')">💾 ذخیره</button>
           </div>
         </div>
-        <div class="setting-row">
-          <div class="setting-label">🔷 آدرس ولت TRX</div>
-          <div class="setting-value">
-            <input class="setting-input" id="s-wallet" type="text" placeholder="آدرس ولت TRX">
-            <button class="btn-save" onclick="saveSetting('trx_wallet','s-wallet')">ذخیره</button>
+        <div style="height:.8rem;"></div>
+        <div class="setting-group">
+          <div class="setting-label">🔷 آدرس کیف پول TRX (ترون)</div>
+          <div class="setting-row">
+            <input class="setting-input" id="s-wallet" type="text" placeholder="آدرس TRX wallet">
+            <button class="btn-save" onclick="saveSetting('trx_wallet','s-wallet')">💾 ذخیره</button>
           </div>
         </div>
       </div>
@@ -1660,22 +1746,22 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0d1b2a;color:#e8f4fd;m
 
     <!-- Products -->
     <div id="tab-products" style="display:none;">
-      <div id="products-list"><div style="text-align:center;color:#607d8b;padding:2rem;">در حال بارگذاری...</div></div>
+      <div id="products-list"><div style="text-align:center;color:#455a64;padding:3rem;">در حال بارگذاری...</div></div>
     </div>
 
     <!-- AI -->
-    <div id="tab-ai" style="display:none;flex-direction:column;">
-      <div class="card" style="margin-bottom:.5rem;">
-        <div class="card-title">🤖 دستیار هوش مصنوعی ربات</div>
-        <div style="font-size:.85rem;color:#90caf9;line-height:1.6;">
-          هر تغییری که می‌خواهید در ربات ایجاد شود را توضیح دهید.<br>
+    <div id="tab-ai">
+      <div class="ai-header">
+        <div class="ai-header-title">🤖 دستیار هوشمند تغییرات ربات</div>
+        <div class="ai-header-sub">
+          هر تغییری که می‌خواهید توضیح دهید — کد دقیق Python با راهنمای کامل دریافت کنید.<br>
           مثال: «یه دکمه اضافه کن که کاربر بتونه سرویسش رو تمدید کنه»
         </div>
       </div>
       <div class="chat-area" id="chat-area"></div>
       <div class="chat-input-row">
-        <textarea class="chat-input" id="chat-input" placeholder="تغییر مورد نظر را بنویسید..." rows="1"></textarea>
-        <button class="chat-send" onclick="sendAiMsg()">↑</button>
+        <textarea class="chat-input" id="chat-input" placeholder="تغییر مورد نظر را شرح دهید..." rows="1"></textarea>
+        <button class="chat-send" onclick="sendAiMsg()">➤</button>
       </div>
     </div>
 
@@ -1687,36 +1773,37 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0d1b2a;color:#e8f4fd;m
 <script>
 const tg = window.Telegram.WebApp;
 tg.ready(); tg.expand();
+tg.setHeaderColor('#0a1628');
+tg.setBackgroundColor('#0a1628');
 const initData = tg.initData;
 let adminMode = false;
-let currentApproveOrderId = null;
-let currentApproveServices = [];
-let currentApproveStep = 0;
-let approveConfigs = [];
-let approveSubs = [];
+let approveState = {};
 
 async function api(path, body={}) {
-  const r = await fetch('/webapp' + path, {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({init_data: initData, ...body})
-  });
-  return r.json();
+  try {
+    const r = await fetch('/webapp' + path, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({init_data: initData, ...body})
+    });
+    return r.json();
+  } catch(e) { return {ok:false, error: String(e)}; }
 }
 
-function showToast(msg) {
+function showToast(msg, dur=2800) {
   const t = document.getElementById('toast');
   t.textContent = msg; t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2500);
+  setTimeout(() => t.classList.remove('show'), dur);
 }
 
-function switchTab(tab) {
+function switchTab(tab, btn) {
   document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
+  btn.classList.add('active');
   ['dashboard','receipts','settings','products','ai'].forEach(t => {
-    const el = document.getElementById('tab-'+t);
-    el.style.display = (t === tab) ? (tab === 'ai' ? 'flex' : 'block') : 'none';
+    document.getElementById('tab-'+t).style.display = 'none';
   });
+  const el = document.getElementById('tab-'+tab);
+  el.style.display = tab === 'ai' ? 'flex' : 'block';
+  if (tab === 'ai') el.style.flexDirection = 'column';
   if (tab === 'receipts') loadReceipts();
   if (tab === 'settings') loadSettings();
   if (tab === 'products') loadProducts();
@@ -1730,81 +1817,86 @@ async function loadStats() {
   document.getElementById('stat-pending').textContent = d.pending;
   document.getElementById('stat-revenue').textContent = Math.round(d.revenue/1000000);
   document.getElementById('stat-orders').textContent = d.orders;
-  document.getElementById('bot-status-text').textContent = d.bot_online ? '🟢 روشن' : '🔴 خاموش';
-  if (d.pending > 0) {
-    const b = document.getElementById('pending-badge');
-    b.textContent = d.pending; b.style.display = '';
-  }
+  const online = d.bot_online;
+  document.getElementById('bot-status-text').textContent = online ? '🟢 ربات در حال اجرا است' : '🔴 ربات خاموش است';
+  const b = document.getElementById('pending-badge');
+  if (d.pending > 0) { b.textContent = d.pending; b.style.display = ''; }
+  else b.style.display = 'none';
 }
 
 async function setBotStatus(online) {
   const d = await api('/bot-status', {online});
   if (d.ok) { showToast(online ? '🟢 ربات روشن شد' : '🔴 ربات خاموش شد'); loadStats(); }
+  else showToast('❌ خطا در تغییر وضعیت');
 }
 
 async function loadReceipts() {
   const d = await api('/pending');
   const el = document.getElementById('receipts-list');
-  if (!d.ok || !d.receipts.length) {
-    el.innerHTML = '<div style="text-align:center;color:#607d8b;padding:2rem;">✅ رسید معلقی وجود ندارد</div>';
+  if (!d.ok) { el.innerHTML = '<div style="text-align:center;color:#ef5350;padding:2rem;">❌ خطا در بارگذاری</div>'; return; }
+  if (!d.receipts.length) {
+    el.innerHTML = '<div style="text-align:center;color:#455a64;padding:3rem;font-size:.9rem;">✅ رسید معلقی وجود ندارد</div>';
     return;
   }
   el.innerHTML = d.receipts.map(r => `
     <div class="receipt-item" id="rec-${r.id}">
-      <div class="receipt-header">
-        <span class="receipt-user">👤 ${r.username || r.user_id}</span>
+      <div class="receipt-top">
+        <span class="receipt-user">👤 ${r.username}</span>
         <span class="receipt-date">${r.created_at}</span>
       </div>
-      <div class="receipt-type">📦 ${r.plan_label} | ${r.qty} سرویس | 💰 ${r.total.toLocaleString()} تومان | ${r.type}</div>
+      <div class="receipt-info">📦 ${r.plan_label} &nbsp;|&nbsp; ${r.qty} سرویس &nbsp;|&nbsp; پرداخت: ${r.type}</div>
+      <div class="receipt-amount">💰 ${r.total.toLocaleString()} تومان</div>
       <div class="btn-row">
-        <button class="btn btn-approve" onclick="startApprove(${r.order_id},${r.qty},'${r.plan_label}')">✅ تایید</button>
+        <button class="btn btn-approve" onclick="startApprove(${r.order_id},${r.qty})">✅ تایید و ارسال کانفیگ</button>
         <button class="btn btn-reject" onclick="rejectOrder(${r.order_id})">❌ رد</button>
       </div>
       <div class="config-form" id="form-${r.order_id}">
-        <div class="step-badge" id="step-badge-${r.order_id}"></div>
+        <div class="step-badge" id="step-badge-${r.order_id}">📋 سرویس ۱</div>
         <label class="form-label" id="cfg-label-${r.order_id}">کانفیگ سرویس ۱:</label>
-        <textarea class="form-input" id="cfg-${r.order_id}" placeholder="کانفیگ را اینجا وارد کنید"></textarea>
-        <label class="form-label" style="margin-top:.5rem;">ساب‌لینک:</label>
-        <textarea class="form-input" id="sub-${r.order_id}" placeholder="ساب‌لینک را وارد کنید"></textarea>
+        <textarea class="form-input" id="cfg-${r.order_id}" placeholder="vless://... یا vmess://..."></textarea>
+        <label class="form-label">ساب‌لینک (اختیاری):</label>
+        <textarea class="form-input" id="sub-${r.order_id}" placeholder="https://..."></textarea>
         <div class="btn-row" style="margin-top:.8rem;">
-          <button class="btn btn-primary" onclick="nextApproveStep(${r.order_id})">⬅️ بعدی</button>
+          <button class="btn btn-primary" onclick="nextStep(${r.order_id})">⬅️ بعدی / ارسال</button>
         </div>
       </div>
     </div>
   `).join('');
 }
 
-function startApprove(orderId, qty, planLabel) {
-  currentApproveOrderId = orderId;
-  currentApproveServices = qty;
-  currentApproveStep = 0;
-  approveConfigs = []; approveSubs = [];
-  const form = document.getElementById('form-'+orderId);
-  form.classList.add('visible');
-  updateStepBadge(orderId, qty);
+function startApprove(orderId, qty) {
+  approveState[orderId] = {qty, step:0, configs:[], subs:[]};
+  document.getElementById('form-'+orderId).classList.add('visible');
+  updateStep(orderId);
 }
 
-function updateStepBadge(orderId, qty) {
-  const step = currentApproveStep + 1;
-  document.getElementById('step-badge-'+orderId).textContent = `سرویس ${step} از ${qty}`;
-  document.getElementById('cfg-label-'+orderId).textContent = `کانفیگ سرویس ${step}:`;
+function updateStep(orderId) {
+  const s = approveState[orderId];
+  const stepNum = s.step + 1;
+  document.getElementById('step-badge-'+orderId).textContent = '📋 سرویس ' + stepNum + ' از ' + s.qty;
+  document.getElementById('cfg-label-'+orderId).textContent = 'کانفیگ سرویس ' + stepNum + ':';
   document.getElementById('cfg-'+orderId).value = '';
   document.getElementById('sub-'+orderId).value = '';
+  document.getElementById('cfg-'+orderId).focus();
 }
 
-async function nextApproveStep(orderId) {
+async function nextStep(orderId) {
+  const s = approveState[orderId];
   const cfg = document.getElementById('cfg-'+orderId).value.trim();
   const sub = document.getElementById('sub-'+orderId).value.trim();
   if (!cfg) { showToast('⚠️ کانفیگ را وارد کنید'); return; }
-  approveConfigs.push(cfg); approveSubs.push(sub);
-  currentApproveStep++;
-  if (currentApproveStep < currentApproveServices) {
-    updateStepBadge(orderId, currentApproveServices);
+  s.configs.push(cfg); s.subs.push(sub); s.step++;
+  if (s.step < s.qty) {
+    updateStep(orderId);
+    showToast('✅ سرویس ' + s.step + ' ثبت شد — بعدی را وارد کنید');
   } else {
-    const d = await api('/approve', {order_id: orderId, configs: approveConfigs, subs: approveSubs});
+    const d = await api('/approve', {order_id: orderId, configs: s.configs, subs: s.subs});
     if (d.ok) {
-      showToast('✅ کانفیگ‌ها ارسال شدند!');
-      document.getElementById('rec-'+orderId).remove();
+      showToast('🎉 ' + s.configs.length + ' کانفیگ ارسال شد!', 3500);
+      const item = document.getElementById('rec-'+orderId.toString().split('').reverse().join('').split('').reverse().join(''));
+      document.getElementById('rec-'+(await api('/pending')).receipts.find?.(r=>r.order_id==orderId)?.id || orderId)?.remove();
+      loadReceipts();
+      delete approveState[orderId];
     } else {
       showToast('❌ خطا: ' + (d.error || 'نامشخص'));
     }
@@ -1812,9 +1904,9 @@ async function nextApproveStep(orderId) {
 }
 
 async function rejectOrder(orderId) {
-  if (!confirm('آیا مطمئن هستید؟')) return;
+  if (!confirm('رسید رد شود؟')) return;
   const d = await api('/reject', {order_id: orderId});
-  if (d.ok) { showToast('❌ سفارش رد شد'); document.getElementById('rec-'+orderId)?.remove(); }
+  if (d.ok) { showToast('❌ رسید رد شد'); loadReceipts(); }
 }
 
 async function loadSettings() {
@@ -1829,39 +1921,34 @@ async function saveSetting(key, inputId) {
   const value = document.getElementById(inputId).value.trim();
   if (!value) { showToast('⚠️ مقدار را وارد کنید'); return; }
   const d = await api('/settings-set', {key, value});
-  if (d.ok) showToast('✅ ذخیره شد!');
-  else showToast('❌ خطا در ذخیره');
+  d.ok ? showToast('✅ ' + (key==='trx_wallet'?'آدرس ولت':'اطلاعات کارت') + ' ذخیره شد!') : showToast('❌ خطا در ذخیره');
 }
 
 async function loadProducts() {
   const d = await api('/products-get');
   const el = document.getElementById('products-list');
-  if (!d.ok || !d.products.length) {
-    el.innerHTML = '<div style="text-align:center;color:#607d8b;padding:2rem;">محصولی وجود ندارد</div>';
-    return;
-  }
+  if (!d.ok || !d.products.length) { el.innerHTML = '<div style="text-align:center;color:#455a64;padding:2rem;">محصولی وجود ندارد</div>'; return; }
   el.innerHTML = d.products.map(p => `
     <div class="product-item">
-      <div class="product-name">${p.label}</div>
-      <div class="product-meta">${p.gb}GB | ${p.days} روز | ${p.price.toLocaleString()} تومان</div>
+      <div class="product-header">${p.label}</div>
+      <div class="product-meta">${p.gb} گیگابایت | ${p.days} روز | ${p.price.toLocaleString()} تومان</div>
       <div class="edit-row">
         <input class="edit-input" id="plbl-${p.id}" value="${p.label}" placeholder="نام محصول">
-        <button class="btn-save" onclick="saveProduct(${p.id},'plbl-${p.id}','pprice-${p.id}')">✓</button>
+        <button class="btn-save" style="flex-shrink:0;" onclick="saveProduct(${p.id})">✓ ذخیره</button>
       </div>
-      <div class="edit-row" style="margin-top:.4rem;">
-        <input class="edit-input" id="pprice-${p.id}" value="${p.price}" type="number" placeholder="قیمت">
+      <div class="edit-row">
+        <input class="edit-input" id="pprice-${p.id}" value="${p.price}" type="number" placeholder="قیمت (تومان)">
       </div>
     </div>
   `).join('');
 }
 
-async function saveProduct(id, lblId, priceId) {
-  const label = document.getElementById(lblId).value.trim();
-  const price = parseInt(document.getElementById(priceId).value);
+async function saveProduct(id) {
+  const label = document.getElementById('plbl-'+id).value.trim();
+  const price = parseInt(document.getElementById('pprice-'+id).value);
   if (!label || !price) { showToast('⚠️ مقادیر را وارد کنید'); return; }
   const d = await api('/products-update', {id, label, price});
-  if (d.ok) showToast('✅ محصول ویرایش شد!');
-  else showToast('❌ خطا');
+  d.ok ? showToast('✅ محصول ویرایش شد!') : showToast('❌ خطا');
 }
 
 const aiHistory = [];
@@ -1869,41 +1956,50 @@ async function sendAiMsg() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
   if (!text) return;
-  input.value = '';
+  input.value = ''; input.style.height = 'auto';
   addMsg(text, 'user');
   aiHistory.push({role:'user', content: text});
-  const typing = addMsg('در حال تایپ...', 'ai', true);
+  const typing = addTyping();
   const d = await api('/ai-chat', {messages: aiHistory});
   typing.remove();
   if (d.ok) {
-    const reply = d.reply;
-    aiHistory.push({role:'assistant', content: reply});
-    addMsg(reply, 'ai');
+    aiHistory.push({role:'assistant', content: d.reply});
+    addMsg(d.reply, 'ai');
   } else {
-    addMsg('❌ خطا در ارتباط با هوش مصنوعی. OPENAI_API_KEY یا GROQ_API_KEY را در Railway تنظیم کنید.', 'ai');
+    addMsg('❌ برای استفاده از هوش مصنوعی، متغیر OPENAI_API_KEY یا GROQ_API_KEY را در Railway تنظیم کنید.', 'ai');
   }
 }
 
-function addMsg(text, role, isTyping=false) {
+function addMsg(text, role) {
   const div = document.createElement('div');
-  div.className = `msg msg-${role}`;
-  if (isTyping) {
-    div.className += ' typing'; div.textContent = text;
+  div.className = 'msg msg-' + role;
+  if (role === 'ai') {
+    div.innerHTML = text
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/```python([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+      .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      .replace(/\n/g, '<br>');
   } else {
-    div.innerHTML = text.replace(/```python([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
-                        .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
-                        .replace(/`([^`]+)`/g, '<code>$1</code>')
-                        .replace(/\n/g, '<br>');
+    div.textContent = text;
   }
   const area = document.getElementById('chat-area');
-  area.appendChild(div);
-  area.scrollTop = area.scrollHeight;
+  area.appendChild(div); area.scrollTop = area.scrollHeight;
   return div;
 }
 
-document.getElementById('chat-input')?.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAiMsg(); }
-});
+function addTyping() {
+  const div = document.createElement('div');
+  div.className = 'msg msg-ai';
+  div.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+  const area = document.getElementById('chat-area');
+  area.appendChild(div); area.scrollTop = area.scrollHeight;
+  return div;
+}
+
+const chatInput = document.getElementById('chat-input');
+chatInput?.addEventListener('keydown', e => { if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); sendAiMsg(); } });
+chatInput?.addEventListener('input', function() { this.style.height='auto'; this.style.height=Math.min(this.scrollHeight,120)+'px'; });
 
 async function init() {
   const d = await api('/me');
@@ -1915,14 +2011,16 @@ async function init() {
   } else {
     document.getElementById('user-locked').classList.add('active');
     if (d.user) {
-      document.getElementById('u-name').textContent = d.user.full_name || '---';
+      const n = (d.user.full_name || '').trim() || 'کاربر';
+      document.getElementById('u-name').textContent = n;
+      document.getElementById('u-avatar').textContent = n[0] || '👤';
+      document.getElementById('u-id-text').textContent = 'شناسه: ' + d.user.user_id;
       document.getElementById('u-id').textContent = d.user.user_id;
       document.getElementById('u-wallet').textContent = (d.user.wallet||0).toLocaleString() + ' تومان';
       document.getElementById('u-svcs').textContent = (d.user.svcs||0) + ' سرویس';
     }
   }
 }
-
 init();
 </script>
 </body>
@@ -1949,6 +2047,9 @@ def shop_page(): return Response(WEBAPP_HTML, content_type="text/html; charset=u
 
 @flask_app.route("/admin")
 def admin_page(): return Response(WEBAPP_HTML, content_type="text/html; charset=utf-8")
+
+@flask_app.route("/panel")
+def panel_page(): return Response(WEBAPP_HTML, content_type="text/html; charset=utf-8")
 
 # ── WebApp API ─────────────────────────────────
 def wa_json(data): return flask_app.response_class(json.dumps(data, ensure_ascii=False), content_type="application/json")
