@@ -28,12 +28,13 @@ BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID       = int(os.environ.get("ADMIN_ID", "8030883585"))
 PORT           = int(os.environ.get("PORT", 8080))
 USD_TO_TOMAN   = int(os.environ.get("USD_TO_TOMAN", "90000"))
-WEBAPP_URL     = os.environ.get("WEBAPP_URL", "")          # https://your-app.railway.app
+WEBAPP_URL     = os.environ.get("WEBAPP_URL", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 
 SUPPORT_USERNAME = "ViraNet0"
 REFERRAL_BONUS   = 5000
+AGENCY_MIN_WALLET = 1  # حداقل ۱ تومان برای درخواست نمایندگی
 
 CARD_NUMBER = "123456789456123"
 CARD_OWNER  = "حسین حسینی"
@@ -41,6 +42,7 @@ TRX_WALLET  = "YOUR_TRX_WALLET_ADDRESS"
 BOT_ONLINE  = True
 PLANS: dict = {}
 crypto_stop_events: dict = {}
+agent_bots: dict = {}  # توکن → thread bot
 
 # ─────────────────────────────────────────────
 #  DATABASE
@@ -92,6 +94,11 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY, value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS agency_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            bot_token TEXT NOT NULL, status TEXT DEFAULT 'pending',
+            admin_msg_id INTEGER, created_at TEXT DEFAULT (datetime('now'))
         );
         """)
         try:
@@ -182,6 +189,12 @@ def random_name():
     return f"{random.choice(adj)}{random.choice(noun)}{random.randint(10,99)}"
 def now_str(): return datetime.now().strftime("%Y-%m-%d %H:%M")
 
+def safe_delete(chat_id, message_id):
+    try:
+        bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
 # ── قیمت TRX ──────────────────────────────────
 def get_trx_price_usd():
     try:
@@ -225,7 +238,7 @@ def crypto_payment_kb():
     return kb
 
 # ── Telegram WebApp validation ─────────────────
-def verify_webapp(init_data: str) -> dict | None:
+def verify_webapp(init_data: str):
     try:
         params = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
         recv_hash = params.pop("hash", None)
@@ -291,22 +304,31 @@ def is_offline_for(uid): return not BOT_ONLINE and uid != ADMIN_ID
 # ── Main Menu ──────────────────────────────────
 def main_menu_kb(user_id):
     kb = types.InlineKeyboardMarkup(row_width=2)
-    # ردیف اول: فروشگاه + پنل کاربری (آبی WebApp)
-    shop_btn = types.InlineKeyboardButton("🛒 فروشگاه", callback_data="menu_shop")
-    if WEBAPP_URL:
-        panel_btn = types.InlineKeyboardButton("🌐 پنل کاربری", web_app=types.WebAppInfo(url=WEBAPP_URL + "/panel"))
-        kb.add(shop_btn, panel_btn)
-    else:
-        kb.add(shop_btn)
+
+    # ردیف ۱: فروشگاه (آبی) + سرویس‌های من (سبز تیره)
     kb.add(
-        types.InlineKeyboardButton("👤 حساب کاربری", callback_data="menu_account"),
-        types.InlineKeyboardButton("💰 کیف پول",    callback_data="menu_wallet"),
+        types.InlineKeyboardButton("🔵 🛒 فروشگاه",        callback_data="menu_shop"),
+        types.InlineKeyboardButton("🟢 📦 سرویس‌های من",   callback_data="menu_services"),
     )
+    # ردیف ۲: تست رایگان (قرمز/نارنجی)
     kb.add(
-        types.InlineKeyboardButton("📦 سرویس‌های من", callback_data="menu_services"),
-        types.InlineKeyboardButton("👥 دعوت دوستان", callback_data="menu_referral"),
+        types.InlineKeyboardButton("📦 تست رایگان",         callback_data="menu_free_test"),
     )
-    kb.add(types.InlineKeyboardButton("🆘 پشتیبانی", url=f"https://t.me/{SUPPORT_USERNAME}"))
+    # ردیف ۳: کیف پول (سبز) + حساب کاربری (آبی)
+    kb.add(
+        types.InlineKeyboardButton("🟢 💰 کیف پول",         callback_data="menu_wallet"),
+        types.InlineKeyboardButton("🔵 👤 حساب کاربری",    callback_data="menu_account"),
+    )
+    # ردیف ۴: دعوت دوستان + پنل کاربری
+    kb.add(
+        types.InlineKeyboardButton("🎁 دعوت دوستان",        callback_data="menu_referral"),
+        types.InlineKeyboardButton("🌐 پنل کاربری",         callback_data="menu_panel"),
+    )
+    # ردیف ۵: پشتیبانی (قرمز)
+    kb.add(types.InlineKeyboardButton("🔴 🆘 پشتیبانی",    url=f"https://t.me/{SUPPORT_USERNAME}"))
+    # ردیف ۶: درخواست نمایندگی
+    kb.add(types.InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="menu_agency"))
+
     if user_id == ADMIN_ID:
         kb.add(
             types.InlineKeyboardButton("🔴 خاموش", callback_data="admin_bot_off"),
@@ -315,7 +337,9 @@ def main_menu_kb(user_id):
         kb.add(types.InlineKeyboardButton("⚙️ پنل ادمین (چت)", callback_data="menu_admin"))
     return kb
 
-def send_main_menu(chat_id, user_id, text=None):
+def send_main_menu(chat_id, user_id, text=None, delete_msg_id=None):
+    if delete_msg_id:
+        safe_delete(chat_id, delete_msg_id)
     bot.send_message(chat_id,
         text or "🏠 <b>منوی اصلی ViraNet</b>\n\n✨ گزینه مورد نظر را انتخاب کنید:",
         reply_markup=main_menu_kb(user_id)
@@ -347,8 +371,13 @@ def cmd_start(msg):
         except Exception: pass
     bot.send_message(msg.chat.id,
         "✨ <b>به ویرا نت خوش آمدید!</b> 🎉\n\n"
-        "💎 <b>فروشگاه سرویس‌های اینترنتی</b>\n\n"
-        "⚡ سرعت بالا | 🛡️ امنیت کامل | 🔧 پشتیبانی ۲۴ ساعته\n\n"
+        "💎 <b>فروشگاه سرویس‌های اینترنتی پرسرعت و امن</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚡ <b>سرعت بالا</b> بدون محدودیت\n"
+        "🛡️ <b>امنیت کامل</b> با رمزنگاری پیشرفته\n"
+        "🔧 <b>پشتیبانی ۲۴/۷</b> در هر ساعت از شبانه‌روز\n"
+        "🚀 <b>فعال‌سازی فوری</b> بعد از تایید پرداخت\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👇 از منوی زیر انتخاب کنید:",
         reply_markup=main_menu_kb(msg.from_user.id)
     )
@@ -361,6 +390,7 @@ def cb_menu_shop(call):
     if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
     bot.answer_callback_query(call.id)
     ensure_user(call.from_user); clear_state(call.from_user.id)
+    safe_delete(call.message.chat.id, call.message.message_id)
     _show_shop(call.message.chat.id, call.from_user.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_account")
@@ -368,6 +398,7 @@ def cb_menu_account(call):
     if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
     bot.answer_callback_query(call.id)
     ensure_user(call.from_user)
+    safe_delete(call.message.chat.id, call.message.message_id)
     _show_account(call.message.chat.id, call.from_user.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_wallet")
@@ -375,6 +406,7 @@ def cb_menu_wallet(call):
     if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
     bot.answer_callback_query(call.id)
     ensure_user(call.from_user); clear_state(call.from_user.id)
+    safe_delete(call.message.chat.id, call.message.message_id)
     _show_wallet(call.message.chat.id, call.from_user.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_services")
@@ -382,6 +414,7 @@ def cb_menu_services(call):
     if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
     bot.answer_callback_query(call.id)
     ensure_user(call.from_user)
+    safe_delete(call.message.chat.id, call.message.message_id)
     _show_my_services(call.message.chat.id, call.from_user.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_referral")
@@ -389,6 +422,7 @@ def cb_menu_referral(call):
     if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
     bot.answer_callback_query(call.id)
     ensure_user(call.from_user)
+    safe_delete(call.message.chat.id, call.message.message_id)
     _show_referral(call.message.chat.id, call.from_user.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_admin")
@@ -400,6 +434,7 @@ def cb_menu_admin(call):
 @bot.callback_query_handler(func=lambda c: c.data == "back_main")
 def cb_back_main(call):
     bot.answer_callback_query(call.id); clear_state(call.from_user.id)
+    safe_delete(call.message.chat.id, call.message.message_id)
     send_main_menu(call.message.chat.id, call.from_user.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_bot_off")
@@ -415,6 +450,283 @@ def cb_bot_on(call):
     if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     bot.answer_callback_query(call.id); BOT_ONLINE = True
     bot.send_message(call.message.chat.id, "🟢 <b>ربات روشن شد.</b>")
+
+# ── پنل کاربری ─────────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "menu_panel")
+def cb_menu_panel(call):
+    uid = call.from_user.id
+    bot.answer_callback_query(call.id)
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id,
+            "🔒 این بخش فقط برای ادمین است!",
+            show_alert=True
+        )
+        bot.send_message(call.message.chat.id,
+            "🔒 <b>دسترسی محدود شد</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🚫 <b>این بخش فقط برای مدیریت ربات است</b>\n\n"
+            "👤 شما به عنوان کاربر عادی دسترسی به پنل مدیریت ندارید.\n\n"
+            "📌 <b>شما می‌توانید از منوی اصلی استفاده کنید:</b>\n\n"
+            "   🛒 خرید سرویس از فروشگاه\n"
+            "   💰 مشاهده و شارژ کیف پول\n"
+            "   📦 مشاهده سرویس‌های فعال\n"
+            "   🆘 تماس با پشتیبانی\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"❓ <b>سوال دارید؟</b> @{SUPPORT_USERNAME}",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_main")
+            )
+        )
+        return
+    # ادمین → پنل وب
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if WEBAPP_URL:
+        kb.add(types.InlineKeyboardButton("🌐 باز کردن پنل مدیریت", web_app=types.WebAppInfo(url=WEBAPP_URL + "/panel")))
+    kb.add(types.InlineKeyboardButton("⚙️ پنل چتی", callback_data="menu_admin"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
+    bot.send_message(call.message.chat.id,
+        "🌐 <b>پنل مدیریت ViraNet</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚙️ از اینجا می‌توانید:\n\n"
+        "   📊 آمار و گزارشات را مشاهده کنید\n"
+        "   📥 رسیدهای معلق را بررسی کنید\n"
+        "   👥 کاربران را مدیریت کنید\n"
+        "   📦 محصولات را ویرایش کنید\n"
+        "   🤖 با هوش مصنوعی تغییرات بدهید\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+# ── تست رایگان ─────────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "menu_free_test")
+def cb_free_test(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_main"))
+    safe_delete(call.message.chat.id, call.message.message_id)
+    bot.send_message(call.message.chat.id,
+        "📦 <b>تست رایگان ViraNet</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🙏 <b>ممنون از علاقه‌مندی شما!</b>\n\n"
+        "⏳ متأسفانه در حال حاضر <b>تست رایگان</b> در دسترس نیست.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "💡 <b>پیشنهاد ما:</b>\n\n"
+        "   🌸 پلن <b>پلوتو</b> با کمترین قیمت را امتحان کنید\n"
+        "   📦 ۲ گیگابایت | ۳۰ روز\n"
+        "   ✅ فعال‌سازی فوری\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🔔 به زودی تست رایگان فعال می‌شود!\n\n"
+        f"❓ اطلاعات بیشتر: @{SUPPORT_USERNAME}",
+        reply_markup=kb
+    )
+
+# ── درخواست نمایندگی ────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "menu_agency")
+def cb_agency(call):
+    if is_offline_for(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    wallet = get_wallet(uid)
+    safe_delete(call.message.chat.id, call.message.message_id)
+
+    if wallet < AGENCY_MIN_WALLET:
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(
+            types.InlineKeyboardButton("💰 شارژ کیف پول", callback_data="menu_wallet"),
+            types.InlineKeyboardButton("🏠 بازگشت", callback_data="back_main"),
+        )
+        bot.send_message(call.message.chat.id,
+            "🤝 <b>درخواست همکاری و نمایندگی</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "⚠️ <b>موجودی ناکافی!</b>\n\n"
+            "برای ثبت درخواست همکاری، حداقل موجودی کیف پول شما باید:\n\n"
+            "   💎 <b>۱ تومان</b> (حداقل یک خرید انجام داده باشید)\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"💰 <b>موجودی فعلی:</b> {fmt(wallet)} تومان\n\n"
+            "📌 <b>چرا این شرط وجود دارد؟</b>\n\n"
+            "   🔹 اطمینان از جدیت درخواست\n"
+            "   🔹 تجربه خرید از پلتفرم ما\n"
+            "   🔹 آشنایی با کیفیت سرویس‌ها\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "👇 کیف پول خود را شارژ کرده و دوباره تلاش کنید:",
+            reply_markup=kb
+        )
+        return
+
+    # موجودی کافی → درخواست توکن
+    set_state(uid, step="agency_token")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="back_main"))
+    bot.send_message(call.message.chat.id,
+        "🤝 <b>درخواست همکاری و نمایندگی ViraNet</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🎉 <b>تبریک!</b> شما واجد شرایط درخواست نمایندگی هستید!\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📋 <b>مزایای نمایندگی:</b>\n\n"
+        "   ✅ ربات اختصاصی با برند خودتان\n"
+        "   ✅ تمام امکانات ViraNet در ربات شما\n"
+        "   ✅ پشتیبانی فنی کامل\n"
+        "   ✅ درآمد از فروش سرویس‌ها\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📌 <b>مراحل:</b>\n\n"
+        "   1️⃣  یک ربات جدید از @BotFather بسازید\n"
+        "   2️⃣  توکن ربات را دریافت کنید\n"
+        "   3️⃣  توکن را اینجا ارسال کنید\n"
+        "   4️⃣  منتظر تایید ادمین باشید\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 <b>توکن ربات خود را ارسال کنید:</b>\n"
+        "<i>(مثال: 1234567890:ABCdef...)</i>",
+        reply_markup=kb
+    )
+
+@bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "agency_token")
+def agency_token_input(msg):
+    if is_offline_for(msg.from_user.id): return bot.send_message(msg.chat.id, OFFLINE_MSG)
+    token = (msg.text or "").strip()
+    if not token or ":" not in token or len(token) < 20:
+        return bot.send_message(msg.chat.id,
+            "⚠️ <b>توکن نامعتبر!</b>\n\n"
+            "فرمت صحیح: <code>1234567890:ABCdefGHIjkl...</code>\n\n"
+            "👇 لطفاً توکن صحیح ارسال کنید:"
+        )
+    uid = msg.from_user.id
+    u = get_user(uid); uname = u["username"] or u["full_name"] or str(uid)
+
+    # ذخیره در DB
+    with get_db() as conn:
+        cur = conn.execute("INSERT INTO agency_requests(user_id,bot_token,status) VALUES(?,?,?)",
+                           (uid, token, "pending"))
+        req_id = cur.lastrowid; conn.commit()
+
+    # ارسال به ادمین
+    adm_kb = types.InlineKeyboardMarkup(row_width=2)
+    adm_kb.add(
+        types.InlineKeyboardButton("✅ تایید نمایندگی", callback_data=f"agency_ok_{req_id}"),
+        types.InlineKeyboardButton("❌ رد",              callback_data=f"agency_rej_{req_id}"),
+    )
+    adm_msg = bot.send_message(ADMIN_ID,
+        f"🤝 <b>درخواست نمایندگی جدید!</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👤 <b>کاربر:</b> @{uname}  |  <code>{uid}</code>\n"
+        f"💰 <b>موجودی:</b> {fmt(get_wallet(uid))} تومان\n"
+        f"🕐 <b>زمان:</b> {now_str()}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🤖 <b>توکن ربات:</b>\n<code>{token}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👇 درخواست را تایید یا رد کنید:",
+        reply_markup=adm_kb
+    )
+    with get_db() as conn:
+        conn.execute("UPDATE agency_requests SET admin_msg_id=? WHERE id=?", (adm_msg.message_id, req_id))
+        conn.commit()
+
+    clear_state(uid)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_main"))
+    bot.send_message(msg.chat.id,
+        "✅ <b>درخواست نمایندگی ثبت شد!</b> 🎉\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📬 درخواست شما برای ادمین ارسال شد.\n\n"
+        "⏳ <b>زمان بررسی:</b> کمتر از ۲۴ ساعت\n\n"
+        "📌 پس از تایید، ربات شما به صورت کامل راه‌اندازی می‌شود.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"❓ پیگیری: @{SUPPORT_USERNAME}",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("agency_ok_"))
+def cb_agency_approve(call):
+    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    req_id = int(call.data[10:])
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        req = conn.execute("SELECT * FROM agency_requests WHERE id=?", (req_id,)).fetchone()
+        if not req: return bot.send_message(call.message.chat.id, "❌ درخواست یافت نشد.")
+        conn.execute("UPDATE agency_requests SET status='approved' WHERE id=?", (req_id,))
+        conn.commit()
+    token = req["bot_token"]; uid = req["user_id"]
+
+    # راه‌اندازی ربات نمایندگی در thread جداگانه
+    def run_agent_bot(agent_token, owner_id):
+        try:
+            agent = telebot.TeleBot(agent_token, parse_mode="HTML")
+
+            @agent.message_handler(commands=["start"])
+            def agent_start(msg):
+                ensure_user(msg.from_user)
+                agent.send_message(msg.chat.id,
+                    "✨ <b>به ویرا نت خوش آمدید!</b> 🎉\n\n"
+                    "💎 <b>فروشگاه سرویس‌های اینترنتی</b>\n\n"
+                    "⚡ سرعت بالا | 🛡️ امنیت کامل | 🔧 پشتیبانی ۲۴ ساعته\n\n"
+                    "👇 از منوی زیر انتخاب کنید:",
+                    reply_markup=main_menu_kb(msg.from_user.id)
+                )
+
+            @agent.message_handler(func=lambda m: True, content_types=['text','photo','document'])
+            def agent_fallback(msg):
+                try:
+                    bot.forward_message(ADMIN_ID, msg.chat.id, msg.message_id)
+                    bot.send_message(ADMIN_ID, f"📨 پیام از ربات نمایندگی\n👤 <code>{msg.from_user.id}</code>\n🤖 مالک: <code>{owner_id}</code>")
+                except Exception: pass
+
+            agent_bots[agent_token] = agent
+            agent.infinity_polling(timeout=30, long_polling_timeout=20)
+        except Exception as e:
+            print(f"[agent bot] Error: {e}")
+
+    t = threading.Thread(target=run_agent_bot, args=(token, uid), daemon=True)
+    t.start()
+
+    # پاک کردن پیام ادمین
+    safe_delete(call.message.chat.id, call.message.message_id)
+
+    # اطلاع به کاربر
+    try:
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_main"))
+        bot.send_message(uid,
+            "🎉 <b>تبریک! درخواست نمایندگی تایید شد!</b> 🚀\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "✅ ربات شما با موفقیت راه‌اندازی شد!\n\n"
+            "🤖 <b>ربات شما هم‌اکنون فعال است</b> و تمام امکانات ViraNet را دارد:\n\n"
+            "   🛒 فروشگاه کامل با تمام پلن‌ها\n"
+            "   💰 سیستم کیف پول\n"
+            "   📦 مدیریت سرویس‌ها\n"
+            "   🆘 پشتیبانی\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📌 <b>نکته:</b> تمام سفارش‌ها و رسیدها به ادمین اصلی ارسال می‌شود.\n\n"
+            f"❓ پشتیبانی: @{SUPPORT_USERNAME}",
+            reply_markup=kb
+        )
+    except Exception: pass
+    bot.send_message(call.message.chat.id, f"✅ نمایندگی برای کاربر <code>{uid}</code> فعال شد!")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("agency_rej_"))
+def cb_agency_reject(call):
+    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    req_id = int(call.data[11:])
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        req = conn.execute("SELECT * FROM agency_requests WHERE id=?", (req_id,)).fetchone()
+        conn.execute("UPDATE agency_requests SET status='rejected' WHERE id=?", (req_id,))
+        conn.commit()
+    safe_delete(call.message.chat.id, call.message.message_id)
+    if req:
+        try:
+            bot.send_message(req["user_id"],
+                "❌ <b>درخواست نمایندگی رد شد</b> 😔\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "متأسفانه درخواست همکاری شما در این مرحله تایید نشد.\n\n"
+                "📌 <b>دلایل احتمالی:</b>\n\n"
+                "   🔹 توکن ربات نامعتبر\n"
+                "   🔹 ظرفیت نمایندگی پر شده\n"
+                "   🔹 شرایط لازم تکمیل نیست\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📞 برای پیگیری: @{SUPPORT_USERNAME}"
+            )
+        except Exception: pass
+    bot.send_message(call.message.chat.id, "❌ درخواست نمایندگی رد شد.")
 
 # ── حساب کاربری ────────────────────────────────
 def _show_account(chat_id, user_id):
@@ -447,7 +759,6 @@ def _show_account(chat_id, user_id):
 #  🛒 SHOP
 # ─────────────────────────────────────────────
 def _fmt_price_short(price):
-    """504000 → ◄504 T"""
     t = price // 1000
     return f"◄{t:,} T"
 
@@ -478,7 +789,6 @@ def _show_shop(chat_id, user_id):
         reply_markup=kb
     )
 
-# Web App data (وقتی از WebApp می‌آد)
 @bot.message_handler(content_types=["web_app_data"])
 def handle_web_app_data(msg):
     try:
@@ -508,9 +818,11 @@ def cb_plan(call):
     bot.answer_callback_query(call.id)
     set_state(call.from_user.id, step="shop_quantity", plan_key=plan_key)
     plan = PLANS[plan_key]
+    safe_delete(call.message.chat.id, call.message.message_id)
     bot.send_message(call.message.chat.id,
         f"✅ <b>پلن انتخاب‌شده:</b>\n{plan['label']}\n\n"
-        f"💰 قیمت هر عدد: <b>{fmt(plan['price'])} تومان</b>\n\n"
+        f"📊 <b>حجم:</b> {plan['gb']} گیگابایت  |  📅 <b>مدت:</b> {plan['days']} روز\n"
+        f"💰 <b>قیمت هر عدد:</b> {fmt(plan['price'])} تومان\n\n"
         "📌 چند سرویس می‌خواهید؟ (۱ تا ۲۰):"
     )
 
@@ -528,8 +840,8 @@ def shop_quantity(msg):
     _ask_name(msg.chat.id, msg.from_user.id, 0, qty, state["plan_key"], total)
 
 def _ask_name(chat_id, user_id, index, qty, plan_key, total):
-    plan = PLANS[plan_key]
-    kb   = types.InlineKeyboardMarkup(row_width=2)
+    plan   = PLANS[plan_key]
+    kb     = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("🎲 اسم رندم",   callback_data=f"name_r_{index}"),
         types.InlineKeyboardButton("✍️ اسم دلخواه", callback_data=f"name_c_{index}"),
@@ -554,6 +866,7 @@ def cb_name(call):
         names = state.get("names", []); names.append(name)
         qty   = state["quantity"]
         set_state(call.from_user.id, step="shop_name", names=names, name_index=index+1)
+        safe_delete(call.message.chat.id, call.message.message_id)
         bot.send_message(call.message.chat.id, f"✅ نام رندم: <b>{name}</b> 🎲")
         if index+1 < qty:
             _ask_name(call.message.chat.id, call.from_user.id, index+1, qty, state["plan_key"], state["total_price"])
@@ -705,13 +1018,17 @@ def _create_order_and_notify(user_id, chat_id, state, payment_method):
         types.InlineKeyboardButton("❌ رد",    callback_data=f"adm_rej_{order_id}"),
     )
     if payment_method == "wallet":
-        bot.send_message(ADMIN_ID,
+        adm_msg = bot.send_message(ADMIN_ID,
             f"🛒 <b>سفارش جدید — کیف پول</b>\n\n"
             f"👤 @{uname}  |  <code>{user_id}</code>\n"
             f"🕐 {now_str()}\n\n"
             f"📦 {plan['label']}\n🔢 {qty} سرویس\n🏷️ نام‌ها:\n{names_t}\n\n"
             f"💰 {fmt(total)} تومان", reply_markup=adm_kb
         )
+        with get_db() as conn:
+            conn.execute("INSERT INTO receipts(user_id,order_id,receipt_type,status,admin_msg_id) VALUES(?,?,?,?,?)",
+                         (user_id, order_id, "purchase_wallet", "pending", adm_msg.message_id))
+            conn.commit()
         clear_state(user_id)
         bot.send_message(chat_id,
             "✅ <b>سفارش ثبت شد!</b> 🎉\n\n"
@@ -773,8 +1090,10 @@ def _handle_shop_receipt(msg):
     clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id,
         "📥 <b>رسید دریافت شد!</b> ✅\n\n"
-        "⏳ در حال بررسی...\n\n"
-        "پس از تایید، کانفیگ در همین چت ارسال می‌شود.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ <b>در حال بررسی رسید شما...</b>\n\n"
+        "📌 پس از تایید، کانفیگ در همین چت ارسال می‌شود.\n\n"
+        f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
         f"❓ سوال؟ @{SUPPORT_USERNAME}"
     )
 
@@ -813,8 +1132,11 @@ def _handle_crypto_receipt(msg):
     clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id,
         "📥 <b>رسید TRX دریافت شد!</b> ✅\n\n"
-        "⏳ در حال بررسی...\n\n"
-        "پس از تایید، کانفیگ ارسال می‌شود."
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ <b>در حال بررسی تراکنش...</b>\n\n"
+        "📌 پس از تایید، کانفیگ ارسال می‌شود.\n\n"
+        f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
+        f"❓ سوال؟ @{SUPPORT_USERNAME}"
     )
 
 # ─────────────────────────────────────────────
@@ -824,13 +1146,37 @@ def _handle_crypto_receipt(msg):
 def cb_admin_approve(call):
     if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     order_id = int(call.data[7:]); bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_config", order_id=order_id, configs=[], subs=[])
+    with get_db() as conn:
+        order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    qty = order["quantity"] if order else 1
+    set_state(ADMIN_ID, step="adm_config", order_id=order_id, configs=[], subs=[], expected_qty=qty)
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("✅ پایان و ارسال (/done)", callback_data=f"adm_done_{order_id}"))
     bot.send_message(call.message.chat.id,
         f"✅ <b>تایید سفارش #{order_id}</b>\n\n"
-        "📋 کانفیگ اول را ارسال کنید.\n"
-        "بعد از هر کانفیگ، ساب‌لینک آن را ارسال کنید.\n"
-        "در پایان /done بفرستید."
+        f"🔢 تعداد سرویس: <b>{qty}</b> عدد\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📋 <b>مرحله ۱:</b> کانفیگ سرویس اول را ارسال کنید\n"
+        "📡 <b>مرحله ۲:</b> ساب‌لینک آن را ارسال کنید\n"
+        "🔁 این کار را برای هر سرویس تکرار کنید\n"
+        "✅ در پایان /done بفرستید یا دکمه زیر را بزنید:",
+        reply_markup=kb
     )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_done_"))
+def cb_adm_done(call):
+    if call.from_user.id != ADMIN_ID: return
+    order_id = int(call.data[9:])
+    state = get_state(ADMIN_ID)
+    if state.get("step") != "adm_config" or state.get("order_id") != order_id: return
+    bot.answer_callback_query(call.id)
+    configs = state.get("configs", []); subs = state.get("subs", [])
+    if not configs:
+        return bot.send_message(call.message.chat.id, "⚠️ هیچ کانفیگی ثبت نشده است.")
+    _deliver_configs(order_id, configs, subs)
+    _delete_receipt_admin_msg(order_id)
+    clear_state(ADMIN_ID)
+    bot.send_message(call.message.chat.id, f"✅ <b>{len(configs)} کانفیگ با موفقیت ارسال شد!</b>")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_rej_"))
 def cb_admin_reject(call):
@@ -838,14 +1184,33 @@ def cb_admin_reject(call):
     order_id = int(call.data[8:]); bot.answer_callback_query(call.id)
     with get_db() as conn:
         order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-        conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (order_id,)); conn.commit()
+        conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (order_id,))
+        conn.execute("UPDATE receipts SET status='rejected' WHERE order_id=?", (order_id,))
+        conn.commit()
+    _delete_receipt_admin_msg(order_id)
     try:
         bot.send_message(order["user_id"],
             "❌ <b>رسید شما رد شد</b> 😔\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "متأسفانه رسید ارسالی شما تایید نشد.\n\n"
+            "📌 <b>دلایل احتمالی:</b>\n\n"
+            "   🔹 رسید ناخوانا یا ناقص\n"
+            "   🔹 مبلغ واریزی اشتباه\n"
+            "   🔹 رسید قدیمی یا تکراری\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📞 برای پیگیری: @{SUPPORT_USERNAME}"
         )
     except Exception: pass
     bot.send_message(call.message.chat.id, f"❌ سفارش #{order_id} رد شد.")
+
+def _delete_receipt_admin_msg(order_id):
+    """پاک کردن پیام رسید ادمین بعد از تایید یا رد"""
+    try:
+        with get_db() as conn:
+            r = conn.execute("SELECT admin_msg_id FROM receipts WHERE order_id=?", (order_id,)).fetchone()
+        if r and r["admin_msg_id"]:
+            safe_delete(ADMIN_ID, r["admin_msg_id"])
+    except Exception: pass
 
 @bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_config")
 def adm_receive_config(msg):
@@ -854,17 +1219,35 @@ def adm_receive_config(msg):
         configs = state.get("configs", []); subs = state.get("subs", [])
         if not configs: return bot.send_message(msg.chat.id, "⚠️ هیچ کانفیگی ثبت نشده.")
         _deliver_configs(order_id, configs, subs)
+        _delete_receipt_admin_msg(order_id)
         clear_state(ADMIN_ID)
-        return bot.send_message(msg.chat.id, f"✅ {len(configs)} کانفیگ ارسال شد.")
+        return bot.send_message(msg.chat.id, f"✅ <b>{len(configs)} کانفیگ ارسال شد.</b>")
     state = get_state(ADMIN_ID); configs = state.get("configs", []); subs = state.get("subs", [])
     text = (msg.text or "").strip()
     if not text: return bot.send_message(msg.chat.id, "⚠️ متن خالی است.")
     if len(configs) == len(subs):
         configs.append(text); set_state(ADMIN_ID, configs=configs)
-        bot.send_message(msg.chat.id, f"✅ کانفیگ {len(configs)} ثبت شد.\n📡 ساب‌لینک این کانفیگ را ارسال کنید:")
+        bot.send_message(msg.chat.id,
+            f"✅ <b>کانفیگ {len(configs)} ثبت شد.</b>\n\n"
+            "📡 حالا ساب‌لینک این کانفیگ را ارسال کنید:\n"
+            "<i>(اگر ساب‌لینک ندارد یک خط تیره - بفرستید)</i>"
+        )
     else:
-        subs.append(text); set_state(ADMIN_ID, subs=subs)
-        bot.send_message(msg.chat.id, f"✅ ساب‌لینک {len(subs)} ثبت شد.\n📋 کانفیگ بعدی یا /done:")
+        sub_text = text if text != "-" else ""
+        subs.append(sub_text); set_state(ADMIN_ID, subs=subs)
+        expected = state.get("expected_qty", 999)
+        if len(configs) >= expected:
+            # همه سرویس‌ها ثبت شدن، ارسال خودکار
+            order_id = state["order_id"]
+            _deliver_configs(order_id, configs, subs)
+            _delete_receipt_admin_msg(order_id)
+            clear_state(ADMIN_ID)
+            bot.send_message(msg.chat.id, f"✅ <b>همه {len(configs)} کانفیگ ارسال شد!</b>")
+        else:
+            bot.send_message(msg.chat.id,
+                f"✅ <b>ساب‌لینک {len(subs)} ثبت شد.</b>\n\n"
+                f"📋 کانفیگ بعدی را ارسال کنید (سرویس {len(configs)+1}):"
+            )
 
 def _deliver_configs(order_id, configs, subs):
     with get_db() as conn:
@@ -885,13 +1268,11 @@ def _deliver_configs(order_id, configs, subs):
         activation_time = datetime.now().strftime("%Y/%m/%d — %H:%M")
         safe_cfg = html_lib.escape(cfg); sub_is_url = sub.startswith("http")
 
-        # ── اول QR بدون کپشن ──
         qr_buf = make_qr_bytes(sub if sub else cfg)
         if qr_buf:
             try: bot.send_photo(user_id, qr_buf)
             except Exception as e: print(f"[QR] {e}")
 
-        # ── بعد متن کامل ──
         kb = types.InlineKeyboardMarkup(row_width=1)
         if sub_is_url:
             kb.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=sub))
@@ -928,7 +1309,9 @@ def _deliver_configs(order_id, configs, subs):
         except Exception as e: print(f"[deliver] {e}")
 
     with get_db() as conn:
-        conn.execute("UPDATE orders SET status='delivered' WHERE id=?", (order_id,)); conn.commit()
+        conn.execute("UPDATE orders SET status='delivered' WHERE id=?", (order_id,))
+        conn.execute("UPDATE receipts SET status='approved' WHERE order_id=?", (order_id,))
+        conn.commit()
 
 # ── Rename ──────────────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rename_"))
@@ -968,13 +1351,29 @@ def _show_my_services(chat_id, user_id):
         svcs = [s for s in conn.execute("SELECT * FROM order_services WHERE config_text IS NOT NULL ORDER BY id DESC").fetchall()
                 if int(s["user_id"]) == int(user_id)]
     if not svcs:
-        return bot.send_message(chat_id, "📦 <b>سرویس‌های من</b>\n\n❌ سرویس فعالی ندارید.\n\n🛒 برای خرید از فروشگاه اقدام کنید.")
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("🛒 رفتن به فروشگاه", callback_data="menu_shop"))
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
+        return bot.send_message(chat_id,
+            "📦 <b>سرویس‌های من</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "❌ <b>سرویس فعالی ندارید.</b>\n\n"
+            "💡 از فروشگاه اقدام به خرید کنید.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            reply_markup=kb
+        )
     kb = types.InlineKeyboardMarkup(row_width=1)
     for svc in svcs:
         plan = PLANS.get(svc["plan_key"], {})
         kb.add(types.InlineKeyboardButton(f"📦 {svc['service_name']}  |  {plan.get('gb','?')}GB", callback_data=f"vs_{svc['id']}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
-    bot.send_message(chat_id, f"📦 <b>سرویس‌های من</b>\n\n🔢 <b>{len(svcs)}</b> سرویس فعال\n\n👇 برای جزئیات روی سرویس بزنید:", reply_markup=kb)
+    bot.send_message(chat_id,
+        f"📦 <b>سرویس‌های من</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔢 <b>{len(svcs)}</b> سرویس فعال\n\n"
+        "👇 برای مشاهده جزئیات روی سرویس بزنید:",
+        reply_markup=kb
+    )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("vs_"))
 def cb_view_svc(call):
@@ -987,16 +1386,24 @@ def cb_view_svc(call):
     kb = types.InlineKeyboardMarkup(row_width=1)
     if sub.startswith("http"): kb.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=sub))
     kb.add(types.InlineKeyboardButton("✏️ تغییر نام", callback_data=f"rename_{svc['id']}"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="menu_services"))
+    safe_delete(call.message.chat.id, call.message.message_id)
     text = (
         f"📦 <b>جزئیات سرویس</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🏷️ <b>نام:</b>  {svc['service_name']}\n"
         f"📊 <b>حجم:</b>  {plan.get('gb','?')} GB\n"
         f"📅 <b>مدت:</b>  {plan.get('days','?')} روز\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "🔐 <b>کانفیگ</b>  👆 <i>بزنید تا کپی شود</i>\n\n"
         f"<code>{svc['config_text']}</code>\n\n"
     )
     if sub:
-        text += f"🔗 <b>ساب‌لینک</b>  👆 <i>بزنید تا کپی شود</i>\n\n<code>{html_lib.escape(sub)}</code>\n\n"
+        text += (
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🔗 <b>ساب‌لینک</b>  👆 <i>بزنید تا کپی شود</i>\n\n"
+            f"<code>{html_lib.escape(sub)}</code>\n\n"
+        )
     bot.send_message(call.message.chat.id, text, reply_markup=kb)
 
 # ─────────────────────────────────────────────
@@ -1009,7 +1416,14 @@ def _show_wallet(chat_id, user_id):
         types.InlineKeyboardButton("💳 شارژ کیف پول", callback_data="wallet_charge"),
         types.InlineKeyboardButton("🔙 بازگشت",        callback_data="back_main"),
     )
-    bot.send_message(chat_id, f"💰 <b>کیف پول</b>\n\n✨ <b>موجودی:</b> {fmt(wallet)} تومان\n\n👇 برای شارژ دکمه زیر را بزنید:", reply_markup=kb)
+    bot.send_message(chat_id,
+        "💰 <b>کیف پول</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✨ <b>موجودی:</b> {fmt(wallet)} تومان\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 برای شارژ دکمه زیر را بزنید:",
+        reply_markup=kb
+    )
 
 @bot.callback_query_handler(func=lambda c: c.data == "wallet_charge")
 def cb_wallet_charge(call):
@@ -1018,8 +1432,10 @@ def cb_wallet_charge(call):
     set_state(call.from_user.id, step="wallet_amount")
     bot.send_message(call.message.chat.id,
         "💳 <b>شارژ کیف پول</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📌 حداقل: <b>۵۰,۰۰۰ تومان</b>\n\n"
-        "👇 مبلغ را وارد کنید:"
+        "👇 مبلغ مورد نظر را وارد کنید:\n"
+        "<i>(مثال: 200000)</i>"
     )
 
 @bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "wallet_amount")
@@ -1033,10 +1449,13 @@ def wallet_amount(msg):
     set_state(msg.from_user.id, step="wallet_receipt", wallet_amount=amount)
     bot.send_message(msg.chat.id,
         f"💳 <b>شارژ کیف پول — پرداخت</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💰 <b>مبلغ:</b> {fmt(amount)} تومان\n\n"
+        "🏦 <b>اطلاعات حساب:</b>\n\n"
         f"  💳 شماره کارت:\n  <code>{CARD_NUMBER}</code>\n\n"
         f"  👤 به نام: <b>{CARD_OWNER}</b>\n\n"
-        "👇 تصویر رسید را ارسال کنید:"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 <b>تصویر رسید را ارسال کنید:</b>"
     )
 
 def _handle_wallet_receipt(msg):
@@ -1052,13 +1471,24 @@ def _handle_wallet_receipt(msg):
         types.InlineKeyboardButton("❌ رد",          callback_data=f"wadm_rej_{req_id}_{msg.from_user.id}"),
     )
     adm_msg = bot.send_photo(ADMIN_ID, file_id,
-        caption=f"💰 <b>شارژ کیف پول</b>\n\n👤 @{uname}  |  <code>{msg.from_user.id}</code>\n🕐 {now_str()}\n\n💰 {fmt(amount)} تومان",
+        caption=(
+            f"💰 <b>درخواست شارژ کیف پول</b>\n\n"
+            f"👤 @{uname}  |  <code>{msg.from_user.id}</code>\n"
+            f"🕐 {now_str()}\n\n"
+            f"💰 {fmt(amount)} تومان"
+        ),
         reply_markup=kb
     )
     with get_db() as conn:
         conn.execute("UPDATE wallet_requests SET admin_msg_id=? WHERE id=?", (adm_msg.message_id, req_id)); conn.commit()
     clear_state(msg.from_user.id)
-    bot.send_message(msg.chat.id, "📥 <b>رسید دریافت شد!</b>\n\n⏳ منتظر تایید ادمین باشید.")
+    bot.send_message(msg.chat.id,
+        "📥 <b>رسید دریافت شد!</b> ✅\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ منتظر تایید ادمین باشید.\n\n"
+        f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
+        f"❓ پیگیری: @{SUPPORT_USERNAME}"
+    )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("wadm_ok_"))
 def cb_wallet_approve(call):
@@ -1068,8 +1498,17 @@ def cb_wallet_approve(call):
     add_wallet(user_id, amount)
     with get_db() as conn:
         conn.execute("UPDATE wallet_requests SET status='approved' WHERE id=?", (req_id,)); conn.commit()
+    safe_delete(call.message.chat.id, call.message.message_id)
     new_bal = get_wallet(user_id)
-    try: bot.send_message(user_id, f"✅ <b>کیف پول شارژ شد!</b>\n💰 {fmt(amount)} تومان\n💎 موجودی جدید: {fmt(new_bal)} تومان")
+    try:
+        bot.send_message(user_id,
+            f"✅ <b>کیف پول شارژ شد!</b> 🎉\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"💰 <b>مبلغ شارژ:</b> {fmt(amount)} تومان\n"
+            f"💎 <b>موجودی جدید:</b> {fmt(new_bal)} تومان\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🛒 از فروشگاه خرید کنید!"
+        )
     except Exception: pass
     bot.send_message(call.message.chat.id, f"✅ {fmt(amount)} تومان به {user_id} اضافه شد.")
 
@@ -1080,9 +1519,14 @@ def cb_wallet_reject(call):
     bot.answer_callback_query(call.id)
     with get_db() as conn:
         conn.execute("UPDATE wallet_requests SET status='rejected' WHERE id=?", (req_id,)); conn.commit()
-    try: bot.send_message(user_id, f"❌ <b>درخواست شارژ رد شد.</b>\n📞 پیگیری: @{SUPPORT_USERNAME}")
+    safe_delete(call.message.chat.id, call.message.message_id)
+    try:
+        bot.send_message(user_id,
+            f"❌ <b>درخواست شارژ رد شد.</b>\n\n"
+            f"📞 پیگیری: @{SUPPORT_USERNAME}"
+        )
     except Exception: pass
-    bot.send_message(call.message.chat.id, "❌ درخواست رد شد.")
+    bot.send_message(call.message.chat.id, "❌ درخواست شارژ رد شد.")
 
 # ─────────────────────────────────────────────
 #  👥 REFERRAL
@@ -1092,13 +1536,23 @@ def _show_referral(chat_id, user_id):
     ref_link = f"https://t.me/{bot_info.username}?start=ref_{u['referral_code']}"
     with get_db() as conn:
         count = conn.execute("SELECT COUNT(*) as c FROM users WHERE referred_by=?", (user_id,)).fetchone()["c"]
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
     bot.send_message(chat_id,
         "👥 <b>دعوت دوستان</b>\n\n"
-        f"💰 پاداش هر دعوت: <b>{fmt(REFERRAL_BONUS)} تومان</b>\n"
-        f"👤 دعوت‌های موفق: <b>{count}</b>\n"
-        f"💸 درآمد کسب‌شده: <b>{fmt(count*REFERRAL_BONUS)} تومان</b>\n\n"
-        "🔗 <b>لینک اختصاصی:</b>\n\n"
-        f"<code>{ref_link}</code>"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎁 <b>پاداش هر دعوت:</b> {fmt(REFERRAL_BONUS)} تومان\n"
+        f"👤 <b>دعوت‌های موفق:</b> {count} نفر\n"
+        f"💸 <b>درآمد کسب‌شده:</b> {fmt(count*REFERRAL_BONUS)} تومان\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📌 <b>نحوه کار:</b>\n\n"
+        "   1️⃣  لینک اختصاصی خود را کپی کنید\n"
+        "   2️⃣  برای دوستان ارسال کنید\n"
+        "   3️⃣  بعد از ثبت‌نام دوستان، پاداش دریافت کنید\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🔗 <b>لینک اختصاصی شما:</b>\n\n"
+        f"<code>{ref_link}</code>",
+        reply_markup=kb
     )
 
 # ─────────────────────────────────────────────
@@ -1108,11 +1562,12 @@ def _show_admin_panel(chat_id):
     bot_status = "🟢 روشن" if BOT_ONLINE else "🔴 خاموش"
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton("👥 لیست کاربران",  callback_data="ap_users_0"),
-        types.InlineKeyboardButton("🔍 جستجوی کاربر",  callback_data="ap_search"),
-        types.InlineKeyboardButton("📊 آمار کلی",       callback_data="ap_stats"),
-        types.InlineKeyboardButton("📋 رسیدهای معلق",  callback_data="ap_pending"),
-        types.InlineKeyboardButton("⚙️ تنظیمات",        callback_data="ap_settings"),
+        types.InlineKeyboardButton("👥 لیست کاربران",    callback_data="ap_users_0"),
+        types.InlineKeyboardButton("🔍 جستجوی کاربر",    callback_data="ap_search"),
+        types.InlineKeyboardButton("📊 آمار کلی",         callback_data="ap_stats"),
+        types.InlineKeyboardButton("📋 رسیدهای معلق",    callback_data="ap_pending"),
+        types.InlineKeyboardButton("🤝 درخواست‌های نمایندگی", callback_data="ap_agency"),
+        types.InlineKeyboardButton("⚙️ تنظیمات",          callback_data="ap_settings"),
     )
     bot.send_message(chat_id,
         f"⚙️ <b>پنل ادمین ViraNet</b>\n\n"
@@ -1120,6 +1575,32 @@ def _show_admin_panel(chat_id):
         "👇 گزینه مورد نظر را انتخاب کنید:",
         reply_markup=kb
     )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_agency" and c.from_user.id == ADMIN_ID)
+def cb_ap_agency(call):
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        reqs = conn.execute(
+            "SELECT ar.*,u.username,u.full_name FROM agency_requests ar "
+            "JOIN users u ON ar.user_id=u.user_id "
+            "WHERE ar.status='pending' ORDER BY ar.created_at DESC"
+        ).fetchall()
+    if not reqs:
+        return bot.send_message(call.message.chat.id, "✅ هیچ درخواست نمایندگی معلقی وجود ندارد.")
+    for r in reqs:
+        uname = r["username"] or r["full_name"] or str(r["user_id"])
+        adm_kb = types.InlineKeyboardMarkup(row_width=2)
+        adm_kb.add(
+            types.InlineKeyboardButton("✅ تایید", callback_data=f"agency_ok_{r['id']}"),
+            types.InlineKeyboardButton("❌ رد",    callback_data=f"agency_rej_{r['id']}"),
+        )
+        bot.send_message(call.message.chat.id,
+            f"🤝 <b>درخواست نمایندگی #{r['id']}</b>\n\n"
+            f"👤 @{uname} | <code>{r['user_id']}</code>\n"
+            f"🕐 {r['created_at'][:16]}\n\n"
+            f"🤖 توکن: <code>{r['bot_token']}</code>",
+            reply_markup=adm_kb
+        )
 
 @bot.callback_query_handler(func=lambda c: c.data == "ap_settings" and c.from_user.id == ADMIN_ID)
 def cb_ap_settings(call):
@@ -1164,98 +1645,94 @@ def cb_ap_change_owner(call):
 @bot.callback_query_handler(func=lambda c: c.data == "ap_change_wallet" and c.from_user.id == ADMIN_ID)
 def cb_ap_change_wallet(call):
     bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_change_wallet")
-    bot.send_message(call.message.chat.id, f"🔷 آدرس ولت فعلی:\n<code>{TRX_WALLET}</code>\n\n👇 آدرس ولت جدید را ارسال کنید:")
+    bot.send_message(call.message.chat.id, f"🔷 آدرس فعلی: <code>{TRX_WALLET}</code>\n\n👇 آدرس جدید را ارسال کنید:")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_change_card")
-def adm_change_card(msg):
-    global CARD_NUMBER
-    new = (msg.text or "").strip().replace(" ","").replace("-","")
-    if len(new) < 10 or not new.isdigit(): return bot.send_message(msg.chat.id, "⚠️ شماره کارت نامعتبر.")
-    CARD_NUMBER = new; save_setting("card_number", CARD_NUMBER); clear_state(ADMIN_ID)
-    bot.send_message(msg.chat.id, f"✅ شماره کارت تغییر یافت!\n\n<code>{CARD_NUMBER}</code>")
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") in ("adm_change_card","adm_change_owner","adm_change_wallet"))
+def adm_change_settings(msg):
+    global CARD_NUMBER, CARD_OWNER, TRX_WALLET
+    step = get_state(ADMIN_ID)["step"]; value = (msg.text or "").strip()
+    if not value: return bot.send_message(msg.chat.id, "⚠️ مقدار خالی!")
+    if step == "adm_change_card":
+        CARD_NUMBER = value; save_setting("card_number", value)
+        bot.send_message(msg.chat.id, f"✅ شماره کارت به <code>{value}</code> تغییر یافت.")
+    elif step == "adm_change_owner":
+        CARD_OWNER = value; save_setting("card_owner", value)
+        bot.send_message(msg.chat.id, f"✅ نام به <b>{value}</b> تغییر یافت.")
+    elif step == "adm_change_wallet":
+        TRX_WALLET = value; save_setting("trx_wallet", value)
+        bot.send_message(msg.chat.id, f"✅ آدرس ولت به <code>{value}</code> تغییر یافت.")
+    clear_state(ADMIN_ID)
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_change_owner")
-def adm_change_owner(msg):
-    global CARD_OWNER
-    new = (msg.text or "").strip()
-    if len(new) < 3: return bot.send_message(msg.chat.id, "⚠️ نام باید حداقل ۳ کاراکتر باشد.")
-    CARD_OWNER = new; save_setting("card_owner", CARD_OWNER); clear_state(ADMIN_ID)
-    bot.send_message(msg.chat.id, f"✅ نام صاحب کارت: <b>{CARD_OWNER}</b>")
-
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_change_wallet")
-def adm_change_wallet(msg):
-    global TRX_WALLET
-    new = (msg.text or "").strip()
-    if len(new) < 10: return bot.send_message(msg.chat.id, "⚠️ آدرس ولت نامعتبر.")
-    TRX_WALLET = new; save_setting("trx_wallet", TRX_WALLET); clear_state(ADMIN_ID)
-    bot.send_message(msg.chat.id, f"✅ آدرس ولت TRX:\n<code>{TRX_WALLET}</code>")
-
-# ── محصولات ─────────────────────────────────────
+# ── Products ─────────────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data == "ap_products" and c.from_user.id == ADMIN_ID)
 def cb_ap_products(call):
     bot.answer_callback_query(call.id)
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("📋 لیست محصولات",      callback_data="ap_product_list"),
-        types.InlineKeyboardButton("➕ اضافه کردن محصول", callback_data="ap_product_add"),
-        types.InlineKeyboardButton("🔙 تنظیمات",            callback_data="ap_settings"),
-    )
-    bot.send_message(call.message.chat.id, "📦 <b>تنظیمات محصولات</b>", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda c: c.data == "ap_product_list" and c.from_user.id == ADMIN_ID)
-def cb_ap_product_list(call):
-    bot.answer_callback_query(call.id); reload_plans()
     with get_db() as conn:
-        products = conn.execute("SELECT * FROM products ORDER BY price").fetchall()
-    if not products: return bot.send_message(call.message.chat.id, "❌ هیچ محصولی ثبت نشده.")
+        prods = conn.execute("SELECT * FROM products ORDER BY price").fetchall()
+    if not prods:
+        return bot.send_message(call.message.chat.id, "محصولی وجود ندارد.")
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for p in products:
+    for p in prods:
         status = "✅" if p["active"] else "❌"
-        kb.add(types.InlineKeyboardButton(f"{status} {p['gb']}GB — {p['days']}روز — {fmt(p['price'])}ت", callback_data=f"ap_prod_{p['id']}"))
-    kb.add(types.InlineKeyboardButton("🔙 محصولات", callback_data="ap_products"))
-    bot.send_message(call.message.chat.id, "📋 <b>لیست محصولات</b>\n\nروی محصول بزنید برای ویرایش:", reply_markup=kb)
+        kb.add(types.InlineKeyboardButton(f"{status} {p['label']} | {fmt(p['price'])}ت", callback_data=f"ap_prod_{p['id']}"))
+    kb.add(types.InlineKeyboardButton("➕ محصول جدید", callback_data="ap_product_add"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",    callback_data="ap_settings"))
+    bot.send_message(call.message.chat.id, "📦 <b>محصولات</b>\n\nبرای ویرایش روی محصول بزنید:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ap_prod_") and c.from_user.id == ADMIN_ID)
-def cb_ap_prod_detail(call):
-    bot.answer_callback_query(call.id); prod_id = int(call.data[8:])
+def cb_ap_prod(call):
+    bot.answer_callback_query(call.id)
+    prod_id = int(call.data[8:])
     with get_db() as conn:
         p = conn.execute("SELECT * FROM products WHERE id=?", (prod_id,)).fetchone()
-    if not p: return bot.send_message(call.message.chat.id, "❌ محصول یافت نشد.")
-    kb = types.InlineKeyboardMarkup(row_width=1)
+    if not p: return
+    kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        types.InlineKeyboardButton("💰 تغییر قیمت",    callback_data=f"ap_chprice_{prod_id}"),
-        types.InlineKeyboardButton("✏️ تغییر نام",     callback_data=f"ap_chname_{prod_id}"),
-        types.InlineKeyboardButton("🔙 لیست محصولات", callback_data="ap_product_list"),
+        types.InlineKeyboardButton("💰 تغییر قیمت", callback_data=f"ap_chprice_{prod_id}"),
+        types.InlineKeyboardButton("✏️ تغییر نام",  callback_data=f"ap_chname_{prod_id}"),
     )
+    toggle = "❌ غیرفعال" if p["active"] else "✅ فعال"
+    kb.add(types.InlineKeyboardButton(toggle, callback_data=f"ap_toggle_{prod_id}"))
+    kb.add(types.InlineKeyboardButton("🔙 محصولات", callback_data="ap_products"))
     bot.send_message(call.message.chat.id,
-        f"📦 <b>محصول #{prod_id}</b>\n\n"
-        f"🏷️ <b>نام:</b> {p['label']}\n"
-        f"📊 <b>حجم:</b> {p['gb']} گیگ\n"
-        f"📅 <b>مدت:</b> {p['days']} روز\n"
-        f"💰 <b>قیمت:</b> {fmt(p['price'])} تومان\n"
-        f"📌 <b>وضعیت:</b> {'✅ فعال' if p['active'] else '❌ غیرفعال'}",
+        f"📦 <b>ویرایش محصول</b>\n\n"
+        f"نام: {p['label']}\n"
+        f"حجم: {p['gb']}GB | مدت: {p['days']} روز\n"
+        f"قیمت: {fmt(p['price'])} تومان\n"
+        f"وضعیت: {'✅ فعال' if p['active'] else '❌ غیرفعال'}",
         reply_markup=kb
     )
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_toggle_") and c.from_user.id == ADMIN_ID)
+def cb_ap_toggle(call):
+    prod_id = int(call.data[10:]); bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        p = conn.execute("SELECT active FROM products WHERE id=?", (prod_id,)).fetchone()
+        new_status = 0 if p["active"] else 1
+        conn.execute("UPDATE products SET active=? WHERE id=?", (new_status, prod_id)); conn.commit()
+    reload_plans()
+    bot.send_message(call.message.chat.id, f"✅ وضعیت محصول {'فعال' if new_status else 'غیرفعال'} شد.")
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ap_chprice_") and c.from_user.id == ADMIN_ID)
-def cb_ap_change_price(call):
-    bot.answer_callback_query(call.id); prod_id = int(call.data[11:])
+def cb_ap_chprice(call):
+    prod_id = int(call.data[11:]); bot.answer_callback_query(call.id)
     set_state(ADMIN_ID, step="adm_change_price", prod_id=prod_id)
     with get_db() as conn:
         p = conn.execute("SELECT * FROM products WHERE id=?", (prod_id,)).fetchone()
-    bot.send_message(call.message.chat.id, f"💰 <b>تغییر قیمت</b>\n\n{p['label']}\n\n👇 قیمت جدید به تومان:")
+    bot.send_message(call.message.chat.id,
+        f"💰 قیمت فعلی: <b>{fmt(p['price'])} تومان</b>\n\n"
+        "👇 قیمت جدید را وارد کنید:"
+    )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ap_chname_") and c.from_user.id == ADMIN_ID)
-def cb_ap_change_name(call):
-    bot.answer_callback_query(call.id); prod_id = int(call.data[10:])
+def cb_ap_chname(call):
+    prod_id = int(call.data[10:]); bot.answer_callback_query(call.id)
     set_state(ADMIN_ID, step="adm_change_pname", prod_id=prod_id)
     with get_db() as conn:
         p = conn.execute("SELECT * FROM products WHERE id=?", (prod_id,)).fetchone()
     bot.send_message(call.message.chat.id,
-        f"✏️ <b>تغییر نام محصول</b>\n\n"
         f"نام فعلی: <b>{p['label']}</b>\n\n"
-        "👇 نام جدید را ارسال کنید:\n"
-        "(نمونه: ⚡ ۱ گیگ — یک ماهه — ویژه)"
+        "👇 نام جدید را وارد کنید:"
     )
 
 @bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_change_price")
@@ -1331,11 +1808,15 @@ def cb_ap_stats(call):
         uc = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
         pc = conn.execute("SELECT COUNT(*) as c FROM receipts WHERE status='pending'").fetchone()["c"]
         ts = conn.execute("SELECT SUM(total_price) as s FROM orders WHERE status='delivered'").fetchone()["s"] or 0
+        ac = conn.execute("SELECT COUNT(*) as c FROM agency_requests WHERE status='pending'").fetchone()["c"]
     bot.send_message(call.message.chat.id,
-        f"📊 <b>آمار کلی</b>\n\n"
-        f"👥 کاربران: <b>{uc}</b>\n"
-        f"📥 رسید معلق: <b>{pc}</b>\n"
-        f"💰 فروش کل: <b>{fmt(ts)} تومان</b>"
+        f"📊 <b>آمار کلی ViraNet</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 <b>کاربران:</b> {uc}\n"
+        f"📥 <b>رسید معلق:</b> {pc}\n"
+        f"🤝 <b>درخواست نمایندگی:</b> {ac}\n"
+        f"💰 <b>فروش کل:</b> {fmt(ts)} تومان\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ap_users_") and c.from_user.id == ADMIN_ID)
@@ -1391,9 +1872,11 @@ def _show_user_detail(chat_id, uid):
     kb.add(types.InlineKeyboardButton("🔙 لیست کاربران", callback_data="ap_users_0"))
     bot.send_message(chat_id,
         f"👤 <b>اطلاعات کاربر</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🆔 <code>{uid}</code>\n"
         f"📛 {u['full_name'] or '---'}\n"
-        f"👤 @{u['username'] or '---'}\n"
+        f"👤 @{u['username'] or '---'}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💰 موجودی: <b>{fmt(u['wallet'])} ت</b>\n"
         f"🛒 سفارش: {oc}  |  💸 خرید: {fmt(ot)} ت\n"
         f"⛔ {'🔴 مسدود' if u['is_banned'] else '🟢 فعال'}\n"
@@ -1461,7 +1944,7 @@ def cb_ap_pending(call):
             types.InlineKeyboardButton("❌ رد",    callback_data=f"adm_rej_{r['order_id']}"),
         )
         bot.send_message(call.message.chat.id,
-            f"📥 رسید #{r['id']}\n"
+            f"📥 <b>رسید #{r['id']}</b>\n"
             f"👤 @{uname} | <code>{r['user_id']}</code>\n"
             f"📅 {r['created_at'][:16]}\n"
             f"نوع: {r['receipt_type']}", reply_markup=kb
@@ -1579,18 +2062,23 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0a1628;color:#e8f4fd;m
 .edit-input{flex:1;background:rgba(255,255,255,.04);border:1px solid rgba(79,195,247,.15);border-radius:8px;padding:.5rem;color:#e8f4fd;font-size:.85rem;font-family:inherit;}
 .edit-row{display:flex;gap:.5rem;margin-bottom:.4rem;}
 
-/* AI chat */
+/* AI chat (تغییرات) */
 #tab-ai{display:none;flex-direction:column;height:calc(100vh - 120px);}
 #tab-ai.visible{display:flex;}
 .ai-header{background:linear-gradient(135deg,rgba(21,101,192,.15),rgba(33,150,243,.1));border:1px solid rgba(79,195,247,.15);border-radius:14px;padding:1rem;margin-bottom:.8rem;}
 .ai-header-title{font-size:.95rem;font-weight:700;color:#4fc3f7;margin-bottom:.3rem;}
 .ai-header-sub{font-size:.8rem;color:#78909c;line-height:1.5;}
+.ai-quick-btns{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem;}
+.ai-quick-btn{background:rgba(79,195,247,.08);border:1px solid rgba(79,195,247,.2);color:#90caf9;border-radius:20px;padding:.35rem .8rem;font-size:.78rem;cursor:pointer;font-family:inherit;transition:all .2s;}
+.ai-quick-btn:hover{background:rgba(79,195,247,.15);color:#4fc3f7;}
 .chat-area{flex:1;overflow-y:auto;padding:.5rem;display:flex;flex-direction:column;gap:.7rem;scroll-behavior:smooth;}
 .msg{max-width:88%;border-radius:14px;padding:.85rem 1rem;font-size:.88rem;line-height:1.6;}
 .msg-user{background:linear-gradient(135deg,#1565c0,#1976d2);color:#fff;align-self:flex-end;border-radius:14px 14px 4px 14px;box-shadow:0 2px 8px rgba(21,101,192,.3);}
 .msg-ai{background:rgba(255,255,255,.04);border:1px solid rgba(79,195,247,.15);align-self:flex-start;border-radius:14px 14px 14px 4px;}
 .msg-ai pre{background:rgba(0,0,0,.4);border-radius:8px;padding:.8rem;overflow-x:auto;margin:.6rem 0;font-size:.78rem;border:1px solid rgba(79,195,247,.1);}
 .msg-ai code{background:rgba(0,0,0,.3);border-radius:4px;padding:.1rem .3rem;font-size:.82rem;font-family:monospace;}
+.copy-btn{background:rgba(79,195,247,.1);border:1px solid rgba(79,195,247,.2);color:#4fc3f7;border-radius:6px;padding:.3rem .7rem;font-size:.75rem;cursor:pointer;font-family:inherit;margin-top:.5rem;transition:all .2s;}
+.copy-btn:hover{background:rgba(79,195,247,.2);}
 .typing-dots{display:flex;gap:.3rem;align-items:center;padding:.5rem;}
 .typing-dots span{width:7px;height:7px;border-radius:50%;background:#4fc3f7;animation:dotBounce .9s infinite;}
 .typing-dots span:nth-child(2){animation-delay:.15s;}
@@ -1610,7 +2098,16 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0a1628;color:#e8f4fd;m
 .loader{position:fixed;inset:0;background:#060e1f;display:flex;align-items:center;justify-content:center;z-index:9999;flex-direction:column;gap:1rem;}
 .spinner{width:48px;height:48px;border:3px solid rgba(79,195,247,.15);border-top-color:#4fc3f7;border-radius:50%;animation:spin 1s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
-@keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.04);}}
+
+/* Bot status badge */
+.bot-status-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:.8rem;}
+.status-badge{padding:.3rem .8rem;border-radius:999px;font-size:.8rem;font-weight:700;}
+.status-on{background:rgba(0,200,83,.15);color:#00c853;border:1px solid rgba(0,200,83,.3);}
+.status-off{background:rgba(255,82,82,.15);color:#ff5252;border:1px solid rgba(255,82,82,.3);}
+.toggle-row{display:flex;gap:.5rem;margin-top:.8rem;}
+.toggle-btn{flex:1;padding:.6rem;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:inherit;font-size:.85rem;}
+.toggle-on{background:linear-gradient(135deg,#00c853,#69f0ae);color:#fff;}
+.toggle-off{background:linear-gradient(135deg,#ff5252,#ff6e40);color:#fff;}
 </style>
 </head>
 <body>
@@ -1631,8 +2128,12 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0a1628;color:#e8f4fd;m
       <div class="user-avatar" id="u-avatar">👤</div>
       <div>
         <div class="user-card-name" id="u-name">در حال بارگذاری...</div>
-        <div class="user-card-id" id="u-id-text">شناسه: ---</div>
+        <div class="user-card-id" id="u-id-text">---</div>
       </div>
+    </div>
+    <div class="info-row">
+      <span class="info-label">🆔 شناسه</span>
+      <span class="info-value" id="u-id">---</span>
     </div>
     <div class="info-row">
       <span class="info-label">💰 موجودی کیف پول</span>
@@ -1642,103 +2143,101 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0a1628;color:#e8f4fd;m
       <span class="info-label">📦 سرویس‌های فعال</span>
       <span class="info-value" id="u-svcs">---</span>
     </div>
-    <div class="info-row">
-      <span class="info-label">🆔 شناسه تلگرام</span>
-      <span class="info-value" id="u-id">---</span>
-    </div>
   </div>
 
   <div class="feature-grid">
-    <div class="feature-box">
-      <div class="feature-icon">⚡</div>
-      <div class="feature-label">سرعت نامحدود</div>
-    </div>
-    <div class="feature-box">
-      <div class="feature-icon">🛡️</div>
-      <div class="feature-label">امنیت کامل</div>
-    </div>
-    <div class="feature-box">
-      <div class="feature-icon">🔧</div>
-      <div class="feature-label">پشتیبانی ۲۴ ساعته</div>
-    </div>
-    <div class="feature-box">
-      <div class="feature-icon">🌍</div>
-      <div class="feature-label">سرورهای جهانی</div>
-    </div>
+    <div class="feature-box"><div class="feature-icon">⚡</div><div class="feature-label">سرعت بالا</div></div>
+    <div class="feature-box"><div class="feature-icon">🛡️</div><div class="feature-label">امنیت کامل</div></div>
+    <div class="feature-box"><div class="feature-icon">🔧</div><div class="feature-label">پشتیبانی ۲۴/۷</div></div>
+    <div class="feature-box"><div class="feature-icon">🚀</div><div class="feature-label">فعال‌سازی فوری</div></div>
   </div>
 
-  <div class="lock-notice">
-    🔒 برای خرید سرویس از ربات تلگرام استفاده کنید
+  <div class="lock-notice" style="margin-top:1.2rem;">
+    🔒 این پنل فقط برای مدیریت ربات است.<br>برای خرید از منوی ربات استفاده کنید.
   </div>
 </div>
 
 <!-- ADMIN PANEL -->
 <div class="screen" id="admin-panel">
   <div class="nav">
-    <span class="nav-logo">⚙️</span>
-    <div class="nav-title">پنل مدیریت ViraNet</div>
+    <div class="nav-logo">🌐</div>
+    <div class="nav-title">ViraNet Admin</div>
     <span class="nav-badge" id="pending-badge" style="display:none">0</span>
   </div>
+
   <div class="tabs">
     <button class="tab active" onclick="switchTab('dashboard',this)">📊 داشبورد</button>
     <button class="tab" onclick="switchTab('receipts',this)">📥 رسیدها</button>
     <button class="tab" onclick="switchTab('settings',this)">⚙️ تنظیمات</button>
     <button class="tab" onclick="switchTab('products',this)">📦 محصولات</button>
-    <button class="tab" onclick="switchTab('ai',this)">🤖 تغییرات ربات</button>
+    <button class="tab" onclick="switchTab('ai',this)">🤖 تغییرات</button>
   </div>
-  <div class="content">
 
+  <div class="content">
     <!-- Dashboard -->
     <div id="tab-dashboard">
       <div class="card">
-        <div class="card-title">📊 آمار کلی</div>
-        <div class="stat-grid">
-          <div class="stat-box"><div class="stat-num" id="stat-users">-</div><div class="stat-lbl">👥 کاربران</div></div>
-          <div class="stat-box"><div class="stat-num" id="stat-pending">-</div><div class="stat-lbl">📥 رسید معلق</div></div>
-          <div class="stat-box"><div class="stat-num" id="stat-revenue">-</div><div class="stat-lbl">💰 فروش (M)</div></div>
-          <div class="stat-box"><div class="stat-num" id="stat-orders">-</div><div class="stat-lbl">🛒 سفارش‌ها</div></div>
+        <div class="card-title">📡 وضعیت ربات</div>
+        <div class="bot-status-row">
+          <span id="bot-status-text" style="font-size:.9rem;color:#90caf9;">در حال بارگذاری...</span>
+          <span class="status-badge status-on" id="bot-status-badge">🟢 آنلاین</span>
+        </div>
+        <div class="toggle-row">
+          <button class="toggle-btn toggle-on" onclick="setBotStatus(true)">🟢 روشن</button>
+          <button class="toggle-btn toggle-off" onclick="setBotStatus(false)">🔴 خاموش</button>
         </div>
       </div>
-      <div class="card">
-        <div class="card-title">📡 وضعیت ربات</div>
-        <div style="text-align:center;font-size:1.15rem;font-weight:700;margin-bottom:1rem;" id="bot-status-text">در حال بارگذاری...</div>
-        <div style="display:flex;gap:.7rem;">
-          <button class="btn btn-reject" onclick="setBotStatus(false)">🔴 خاموش کردن</button>
-          <button class="btn btn-approve" onclick="setBotStatus(true)">🟢 روشن کردن</button>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="stat-num" id="stat-users">—</div><div class="stat-lbl">👥 کاربران</div></div>
+        <div class="stat-box"><div class="stat-num" id="stat-pending">—</div><div class="stat-lbl">📥 رسید معلق</div></div>
+        <div class="stat-box"><div class="stat-num" id="stat-revenue">—</div><div class="stat-lbl">💰 درآمد (M)</div></div>
+        <div class="stat-box"><div class="stat-num" id="stat-orders">—</div><div class="stat-lbl">🛒 سفارش‌ها</div></div>
+      </div>
+      <div class="card" style="margin-top:.8rem;">
+        <div class="card-title">⚡ دسترسی سریع</div>
+        <div style="display:flex;flex-direction:column;gap:.5rem;">
+          <button class="btn btn-primary" onclick="switchTab('receipts',document.querySelectorAll('.tab')[1])">📥 مشاهده رسیدها</button>
+          <button class="btn btn-primary" onclick="loadStats()">🔄 بروزرسانی آمار</button>
         </div>
       </div>
     </div>
 
     <!-- Receipts -->
     <div id="tab-receipts" style="display:none;">
-      <div id="receipts-list"><div style="text-align:center;color:#455a64;padding:3rem 1rem;">در حال بارگذاری رسیدها...</div></div>
+      <div class="card">
+        <div class="card-title">📥 رسیدهای معلق
+          <button onclick="loadReceipts()" style="margin-right:auto;background:rgba(79,195,247,.1);border:1px solid rgba(79,195,247,.2);color:#4fc3f7;border-radius:8px;padding:.25rem .6rem;font-size:.75rem;cursor:pointer;font-family:inherit;">🔄 بروز</button>
+        </div>
+        <div id="receipts-list"></div>
+      </div>
     </div>
 
     <!-- Settings -->
     <div id="tab-settings" style="display:none;">
       <div class="card">
-        <div class="card-title">💳 اطلاعات پرداخت</div>
+        <div class="card-title">💳 اطلاعات کارت بانکی</div>
         <div class="setting-group">
-          <div class="setting-label">شماره کارت بانکی</div>
+          <div class="setting-label">شماره کارت</div>
           <div class="setting-row">
-            <input class="setting-input" id="s-card" type="text" placeholder="مثال: 6037997812345678">
-            <button class="btn-save" onclick="saveSetting('card_number','s-card')">💾 ذخیره</button>
+            <input class="setting-input" id="s-card" placeholder="شماره کارت">
+            <button class="btn-save" onclick="saveSetting('card_number','s-card')">✓</button>
           </div>
         </div>
-        <div style="height:.8rem;"></div>
-        <div class="setting-group">
+        <div class="setting-group" style="margin-top:.8rem;">
           <div class="setting-label">نام صاحب کارت</div>
           <div class="setting-row">
-            <input class="setting-input" id="s-owner" type="text" placeholder="مثال: علی احمدی">
-            <button class="btn-save" onclick="saveSetting('card_owner','s-owner')">💾 ذخیره</button>
+            <input class="setting-input" id="s-owner" placeholder="نام صاحب کارت">
+            <button class="btn-save" onclick="saveSetting('card_owner','s-owner')">✓</button>
           </div>
         </div>
-        <div style="height:.8rem;"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">🔷 آدرس کیف پول TRX</div>
         <div class="setting-group">
-          <div class="setting-label">🔷 آدرس کیف پول TRX (ترون)</div>
+          <div class="setting-label">آدرس ولت ترون</div>
           <div class="setting-row">
-            <input class="setting-input" id="s-wallet" type="text" placeholder="آدرس TRX wallet">
-            <button class="btn-save" onclick="saveSetting('trx_wallet','s-wallet')">💾 ذخیره</button>
+            <input class="setting-input" id="s-wallet" placeholder="T...">
+            <button class="btn-save" onclick="saveSetting('trx_wallet','s-wallet')">✓</button>
           </div>
         </div>
       </div>
@@ -1746,17 +2245,27 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0a1628;color:#e8f4fd;m
 
     <!-- Products -->
     <div id="tab-products" style="display:none;">
-      <div id="products-list"><div style="text-align:center;color:#455a64;padding:3rem;">در حال بارگذاری...</div></div>
+      <div class="card">
+        <div class="card-title">📦 مدیریت محصولات</div>
+        <div id="products-list"></div>
+      </div>
     </div>
 
-    <!-- AI -->
+    <!-- AI تغییرات -->
     <div id="tab-ai">
       <div class="ai-header">
-        <div class="ai-header-title">🤖 دستیار هوشمند تغییرات ربات</div>
+        <div class="ai-header-title">🤖 هوش مصنوعی — تغییرات ربات</div>
         <div class="ai-header-sub">
           هر تغییری که می‌خواهید توضیح دهید — کد دقیق Python با راهنمای کامل دریافت کنید.<br>
           مثال: «یه دکمه اضافه کن که کاربر بتونه سرویسش رو تمدید کنه»
         </div>
+      </div>
+      <div class="ai-quick-btns">
+        <button class="ai-quick-btn" onclick="quickMsg('یه دکمه تمدید سرویس اضافه کن')">🔄 تمدید سرویس</button>
+        <button class="ai-quick-btn" onclick="quickMsg('سیستم کد تخفیف اضافه کن')">🎁 کد تخفیف</button>
+        <button class="ai-quick-btn" onclick="quickMsg('پیام خوش‌آمدگویی رو بهتر کن')">✨ بهبود متن</button>
+        <button class="ai-quick-btn" onclick="quickMsg('یه دکمه آمار کاربران به منو اضافه کن')">📊 آمار کاربران</button>
+        <button class="ai-quick-btn" onclick="quickMsg('سیستم اعلان خودکار اضافه کن')">🔔 اعلان‌ها</button>
       </div>
       <div class="chat-area" id="chat-area"></div>
       <div class="chat-input-row">
@@ -1764,7 +2273,6 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0a1628;color:#e8f4fd;m
         <button class="chat-send" onclick="sendAiMsg()">➤</button>
       </div>
     </div>
-
   </div>
 </div>
 
@@ -1799,9 +2307,11 @@ function switchTab(tab, btn) {
   document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   ['dashboard','receipts','settings','products','ai'].forEach(t => {
-    document.getElementById('tab-'+t).style.display = 'none';
+    const el = document.getElementById('tab-'+t);
+    if(el) el.style.display = 'none';
   });
   const el = document.getElementById('tab-'+tab);
+  if(!el) return;
   el.style.display = tab === 'ai' ? 'flex' : 'block';
   if (tab === 'ai') el.style.flexDirection = 'column';
   if (tab === 'receipts') loadReceipts();
@@ -1819,6 +2329,9 @@ async function loadStats() {
   document.getElementById('stat-orders').textContent = d.orders;
   const online = d.bot_online;
   document.getElementById('bot-status-text').textContent = online ? '🟢 ربات در حال اجرا است' : '🔴 ربات خاموش است';
+  const badge = document.getElementById('bot-status-badge');
+  badge.textContent = online ? '🟢 آنلاین' : '🔴 آفلاین';
+  badge.className = 'status-badge ' + (online ? 'status-on' : 'status-off');
   const b = document.getElementById('pending-badge');
   if (d.pending > 0) { b.textContent = d.pending; b.style.display = ''; }
   else b.style.display = 'none';
@@ -1847,8 +2360,8 @@ async function loadReceipts() {
       <div class="receipt-info">📦 ${r.plan_label} &nbsp;|&nbsp; ${r.qty} سرویس &nbsp;|&nbsp; پرداخت: ${r.type}</div>
       <div class="receipt-amount">💰 ${r.total.toLocaleString()} تومان</div>
       <div class="btn-row">
-        <button class="btn btn-approve" onclick="startApprove(${r.order_id},${r.qty})">✅ تایید و ارسال کانفیگ</button>
-        <button class="btn btn-reject" onclick="rejectOrder(${r.order_id})">❌ رد</button>
+        <button class="btn btn-approve" onclick="startApprove(${r.order_id},${r.qty},${r.id})">✅ تایید و ارسال کانفیگ</button>
+        <button class="btn btn-reject" onclick="rejectOrder(${r.order_id},${r.id})">❌ رد</button>
       </div>
       <div class="config-form" id="form-${r.order_id}">
         <div class="step-badge" id="step-badge-${r.order_id}">📋 سرویس ۱</div>
@@ -1864,8 +2377,8 @@ async function loadReceipts() {
   `).join('');
 }
 
-function startApprove(orderId, qty) {
-  approveState[orderId] = {qty, step:0, configs:[], subs:[]};
+function startApprove(orderId, qty, recId) {
+  approveState[orderId] = {qty, step:0, configs:[], subs:[], recId};
   document.getElementById('form-'+orderId).classList.add('visible');
   updateStep(orderId);
 }
@@ -1893,9 +2406,8 @@ async function nextStep(orderId) {
     const d = await api('/approve', {order_id: orderId, configs: s.configs, subs: s.subs});
     if (d.ok) {
       showToast('🎉 ' + s.configs.length + ' کانفیگ ارسال شد!', 3500);
-      const item = document.getElementById('rec-'+orderId.toString().split('').reverse().join('').split('').reverse().join(''));
-      document.getElementById('rec-'+(await api('/pending')).receipts.find?.(r=>r.order_id==orderId)?.id || orderId)?.remove();
-      loadReceipts();
+      const recEl = document.getElementById('rec-'+s.recId);
+      if (recEl) recEl.remove();
       delete approveState[orderId];
     } else {
       showToast('❌ خطا: ' + (d.error || 'نامشخص'));
@@ -1903,10 +2415,14 @@ async function nextStep(orderId) {
   }
 }
 
-async function rejectOrder(orderId) {
+async function rejectOrder(orderId, recId) {
   if (!confirm('رسید رد شود؟')) return;
   const d = await api('/reject', {order_id: orderId});
-  if (d.ok) { showToast('❌ رسید رد شد'); loadReceipts(); }
+  if (d.ok) {
+    showToast('❌ رسید رد شد');
+    const recEl = document.getElementById('rec-'+recId);
+    if (recEl) recEl.remove();
+  }
 }
 
 async function loadSettings() {
@@ -1930,7 +2446,7 @@ async function loadProducts() {
   if (!d.ok || !d.products.length) { el.innerHTML = '<div style="text-align:center;color:#455a64;padding:2rem;">محصولی وجود ندارد</div>'; return; }
   el.innerHTML = d.products.map(p => `
     <div class="product-item">
-      <div class="product-header">${p.label}</div>
+      <div class="product-header">${p.active ? '✅' : '❌'} ${p.label}</div>
       <div class="product-meta">${p.gb} گیگابایت | ${p.days} روز | ${p.price.toLocaleString()} تومان</div>
       <div class="edit-row">
         <input class="edit-input" id="plbl-${p.id}" value="${p.label}" placeholder="نام محصول">
@@ -1952,6 +2468,12 @@ async function saveProduct(id) {
 }
 
 const aiHistory = [];
+
+function quickMsg(text) {
+  document.getElementById('chat-input').value = text;
+  sendAiMsg();
+}
+
 async function sendAiMsg() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
@@ -1974,18 +2496,28 @@ function addMsg(text, role) {
   const div = document.createElement('div');
   div.className = 'msg msg-' + role;
   if (role === 'ai') {
-    div.innerHTML = text
+    let html = text
       .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-      .replace(/```python([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+      .replace(/```python([\s\S]*?)```/g, (_, code) => {
+        const id = 'code_' + Math.random().toString(36).slice(2);
+        return '<pre><code id="' + id + '">' + code + '</code></pre><button class="copy-btn" onclick="copyCode(\'' + id + '\')">📋 کپی کد</button>';
+      })
       .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
       .replace(/`([^`\n]+)`/g, '<code>$1</code>')
       .replace(/\n/g, '<br>');
+    div.innerHTML = html;
   } else {
     div.textContent = text;
   }
   const area = document.getElementById('chat-area');
   area.appendChild(div); area.scrollTop = area.scrollHeight;
   return div;
+}
+
+function copyCode(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent).then(() => showToast('✅ کد کپی شد!')).catch(() => showToast('❌ خطا در کپی'));
 }
 
 function addTyping() {
@@ -2129,8 +2661,8 @@ def wa_approve():
     if not order_id or not configs: return wa_json({"ok":False,"error":"missing data"})
     try:
         _deliver_configs(order_id, configs, subs)
-        with get_db() as conn:
-            conn.execute("UPDATE receipts SET status='approved' WHERE order_id=?", (order_id,)); conn.commit()
+        # پاک کردن پیام ادمین در تلگرام
+        _delete_receipt_admin_msg(order_id)
         return wa_json({"ok":True})
     except Exception as e:
         return wa_json({"ok":False,"error":str(e)})
@@ -2147,8 +2679,13 @@ def wa_reject():
             conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (order_id,))
             conn.execute("UPDATE receipts SET status='rejected' WHERE order_id=?", (order_id,))
             conn.commit()
+        _delete_receipt_admin_msg(order_id)
         try:
-            bot.send_message(order["user_id"], f"❌ <b>رسید شما رد شد.</b>\n📞 پیگیری: @{SUPPORT_USERNAME}")
+            bot.send_message(order["user_id"],
+                "❌ <b>رسید شما رد شد.</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📞 پیگیری: @{SUPPORT_USERNAME}"
+            )
         except Exception: pass
         return wa_json({"ok":True})
     except Exception as e:
