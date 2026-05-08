@@ -37,9 +37,9 @@ FORCE_CHANNELS = os.environ.get(
     "@ViraNet"
 ).split(",")
 
-SUPPORT_USERNAME = "ViraNet0"
-REFERRAL_BONUS   = 5000
-AGENCY_MIN_WALLET = 1  # حداقل ۱ تومان برای درخواست نمایندگی
+SUPPORT_USERNAME  = "ViraNet0"
+REFERRAL_BONUS    = 5000
+AGENCY_MIN_WALLET = 1
 
 CARD_NUMBER = "123456789456123"
 CARD_OWNER  = "حسین حسینی"
@@ -47,7 +47,24 @@ TRX_WALLET  = "YOUR_TRX_WALLET_ADDRESS"
 BOT_ONLINE  = True
 PLANS: dict = {}
 crypto_stop_events: dict = {}
-agent_bots: dict = {}  # توکن → thread bot
+agent_bots: dict = {}
+
+FREE_TRIAL_ENABLED = False
+FREE_TRIAL_DAYS    = 1
+FREE_TRIAL_GB      = 1
+FREE_TRIAL_CONFIG  = ""
+
+APP_LINK_IOS     = ""
+APP_LINK_ANDROID = ""
+
+GROUP_ID    = ""
+PANEL_URL   = ""
+PANEL_TOKEN = ""
+
+NOTIFY_NEW_USER  = True
+NOTIFY_NEW_ORDER = True
+
+WELCOME_TEXT = ""
 
 # ─────────────────────────────────────────────
 #  DATABASE
@@ -138,15 +155,31 @@ def init_db():
                 conn.execute("INSERT OR IGNORE INTO products(plan_key,label,gb,days,price) VALUES(?,?,?,?,?)", (key, lbl, gb, days, price))
             conn.commit()
 
-        for k, v in [("card_number", CARD_NUMBER), ("card_owner", CARD_OWNER), ("trx_wallet", TRX_WALLET)]:
+        defaults = [
+            ("card_number",       CARD_NUMBER),
+            ("card_owner",        CARD_OWNER),
+            ("trx_wallet",        TRX_WALLET),
+            ("support_username",  SUPPORT_USERNAME),
+            ("referral_bonus",    str(REFERRAL_BONUS)),
+            ("free_trial_enabled","0"),
+            ("free_trial_days",   str(FREE_TRIAL_DAYS)),
+            ("free_trial_gb",     str(FREE_TRIAL_GB)),
+            ("free_trial_config", ""),
+            ("app_link_ios",      ""),
+            ("app_link_android",  ""),
+            ("group_id",          ""),
+            ("panel_url",         ""),
+            ("panel_token",       ""),
+            ("notify_new_user",   "1"),
+            ("notify_new_order",  "1"),
+            ("welcome_text",      ""),
+        ]
+        for k, v in defaults:
             if not conn.execute("SELECT 1 FROM settings WHERE key=?", (k,)).fetchone():
                 conn.execute("INSERT INTO settings(key,value) VALUES(?,?)", (k, v))
         conn.commit()
 
-        for row in conn.execute("SELECT key,value FROM settings").fetchall():
-            if row["key"] == "card_number": CARD_NUMBER = row["value"]
-            if row["key"] == "card_owner":  CARD_OWNER  = row["value"]
-            if row["key"] == "trx_wallet":  TRX_WALLET  = row["value"]
+        _reload_settings(conn)
 
     reload_plans()
     print("✅ Database ready")
@@ -168,6 +201,38 @@ def save_setting(key, value):
     with get_db() as conn:
         conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, value))
         conn.commit()
+    with get_db() as conn:
+        _reload_settings(conn)
+
+def _reload_settings(conn=None):
+    global CARD_NUMBER, CARD_OWNER, TRX_WALLET, SUPPORT_USERNAME, REFERRAL_BONUS
+    global FREE_TRIAL_ENABLED, FREE_TRIAL_DAYS, FREE_TRIAL_GB, FREE_TRIAL_CONFIG
+    global APP_LINK_IOS, APP_LINK_ANDROID, GROUP_ID, PANEL_URL, PANEL_TOKEN
+    global NOTIFY_NEW_USER, NOTIFY_NEW_ORDER, WELCOME_TEXT
+    def _q(c):
+        return {r["key"]: r["value"] for r in c.execute("SELECT key,value FROM settings").fetchall()}
+    if conn:
+        d = _q(conn)
+    else:
+        with get_db() as c:
+            d = _q(c)
+    CARD_NUMBER        = d.get("card_number",       CARD_NUMBER)
+    CARD_OWNER         = d.get("card_owner",        CARD_OWNER)
+    TRX_WALLET         = d.get("trx_wallet",        TRX_WALLET)
+    SUPPORT_USERNAME   = d.get("support_username",  SUPPORT_USERNAME)
+    REFERRAL_BONUS     = int(d.get("referral_bonus", str(REFERRAL_BONUS)))
+    FREE_TRIAL_ENABLED = d.get("free_trial_enabled","0") == "1"
+    FREE_TRIAL_DAYS    = int(d.get("free_trial_days", str(FREE_TRIAL_DAYS)))
+    FREE_TRIAL_GB      = int(d.get("free_trial_gb",   str(FREE_TRIAL_GB)))
+    FREE_TRIAL_CONFIG  = d.get("free_trial_config", "")
+    APP_LINK_IOS       = d.get("app_link_ios",      "")
+    APP_LINK_ANDROID   = d.get("app_link_android",  "")
+    GROUP_ID           = d.get("group_id",          "")
+    PANEL_URL          = d.get("panel_url",         "")
+    PANEL_TOKEN        = d.get("panel_token",       "")
+    NOTIFY_NEW_USER    = d.get("notify_new_user",   "1") == "1"
+    NOTIFY_NEW_ORDER   = d.get("notify_new_order",  "1") == "1"
+    WELCOME_TEXT       = d.get("welcome_text",      "")
 
 # ─────────────────────────────────────────────
 #  HELPERS
@@ -1852,20 +1917,32 @@ def _show_referral(chat_id, user_id):
 def _show_admin_panel(chat_id):
     bot_status = "🟢 روشن" if BOT_ONLINE else "🔴 خاموش"
     kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🌐 مدیریت نوع و پکیج‌ها", callback_data="ap_products"))
     kb.add(
-        types.InlineKeyboardButton("👥 لیست کاربران",    callback_data="ap_users_0"),
-        types.InlineKeyboardButton("🔍 جستجوی کاربر",    callback_data="ap_search"),
-        types.InlineKeyboardButton("📊 آمار کلی",         callback_data="ap_stats"),
-        types.InlineKeyboardButton("📋 رسیدهای معلق",    callback_data="ap_pending"),
-        types.InlineKeyboardButton("🤝 درخواست‌های نمایندگی", callback_data="ap_agency"),
-        types.InlineKeyboardButton("📢 عضو اجباری",       callback_data="admin_force_join"),
-        types.InlineKeyboardButton("📣 پیام بات",          callback_data="ap_broadcast"),
-        types.InlineKeyboardButton("⚙️ تنظیمات",          callback_data="ap_settings"),
+        types.InlineKeyboardButton("📊 آمار کلی",        callback_data="ap_stats"),
+        types.InlineKeyboardButton("🔍 جستجوی کاربر",   callback_data="ap_search"),
     )
+    kb.add(
+        types.InlineKeyboardButton("👥 مدیریت کاربران",     callback_data="ap_users_0"),
+        types.InlineKeyboardButton("🤝 مدیریت نمایندگان",  callback_data="ap_agency"),
+    )
+    kb.add(
+        types.InlineKeyboardButton("📈 آمار فروش",   callback_data="ap_sales"),
+        types.InlineKeyboardButton("⚙️ تنظیمات",    callback_data="ap_settings"),
+    )
+    kb.add(
+        types.InlineKeyboardButton("📣 پیام بات",      callback_data="ap_broadcast"),
+        types.InlineKeyboardButton("📢 عضو اجباری",    callback_data="admin_force_join"),
+    )
+    kb.add(
+        types.InlineKeyboardButton("📋 رسیدهای بررسی نشده", callback_data="ap_pending"),
+        types.InlineKeyboardButton("🚫 کاربران مسدود",       callback_data="ap_banned"),
+    )
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="start_back"))
     bot.send_message(chat_id,
-        f"⚙️ <b>پنل ادمین ViraNet</b>\n\n"
+        f"⚙️ <b>پنل مدیریت</b>\n\n"
         f"📡 وضعیت ربات: <b>{bot_status}</b>\n\n"
-        "👇 گزینه مورد نظر را انتخاب کنید:",
+        "👇 بخش مورد نظر را انتخاب کنید:",
         reply_markup=kb
     )
 
@@ -2022,11 +2099,498 @@ def cb_ap_settings(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton("💳 اطلاعات کارت", callback_data="ap_card_settings"),
-        types.InlineKeyboardButton("📦 محصولات",       callback_data="ap_products"),
-        types.InlineKeyboardButton("🔙 پنل ادمین",     callback_data="menu_admin"),
+        types.InlineKeyboardButton("💳 اطلاعات پرداخت",  callback_data="ap_card_settings"),
+        types.InlineKeyboardButton("🎧 پشتیبانی",         callback_data="ap_support"),
     )
-    bot.send_message(call.message.chat.id, "⚙️ <b>تنظیمات</b>\n\nگزینه مورد نظر را انتخاب کنید:", reply_markup=kb)
+    kb.add(types.InlineKeyboardButton("📢 کانال قفل",                   callback_data="admin_force_join"))
+    kb.add(types.InlineKeyboardButton("🎁 تست رایگان",                   callback_data="ap_free_trial"))
+    kb.add(types.InlineKeyboardButton("📝 متن‌های ربات",                 callback_data="ap_bot_texts"))
+    kb.add(types.InlineKeyboardButton("🧩 چیدمان و متن های منو استارت", callback_data="ap_start_menu"))
+    kb.add(types.InlineKeyboardButton("🤖 مدیریت فروش",                  callback_data="ap_sales_settings"))
+    kb.add(types.InlineKeyboardButton("📱 لینک‌های دانلود",              callback_data="ap_app_links"))
+    kb.add(types.InlineKeyboardButton("⚙️ مدیریت عملیات ربات",          callback_data="ap_bot_ops"))
+    kb.add(types.InlineKeyboardButton("🏢 مدیریت گروه",                  callback_data="ap_group"))
+    kb.add(types.InlineKeyboardButton("🎮 مدیریت پنل VPN",               callback_data="ap_vpn_panel"))
+    kb.add(types.InlineKeyboardButton("📲 دریافت اپلیکیشن‌ها",           callback_data="ap_app_links"))
+    kb.add(types.InlineKeyboardButton("🔔 مدیریت اعلان‌ها",              callback_data="ap_notifications"))
+    kb.add(types.InlineKeyboardButton("🗑️ پاکسازی داده‌ها",             callback_data="ap_cleanup"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت به پنل ادمین",          callback_data="menu_admin"))
+    bot.send_message(call.message.chat.id,
+        "⚙️ <b>تنظیمات</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 گزینه مورد نظر را انتخاب کنید:",
+        reply_markup=kb
+    )
+
+# ── پشتیبانی ─────────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_support" and c.from_user.id == ADMIN_ID)
+def cb_ap_support(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("✏️ تغییر یوزرنیم پشتیبانی", callback_data="ap_set_support"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات", callback_data="ap_settings"))
+    bot.send_message(call.message.chat.id,
+        "🎧 <b>پشتیبانی</b>\n\n"
+        f"👤 یوزرنیم فعلی: <b>@{SUPPORT_USERNAME}</b>\n\n"
+        "کاربران برای پشتیبانی به این آدرس هدایت می‌شوند.",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_set_support" and c.from_user.id == ADMIN_ID)
+def cb_ap_set_support(call):
+    bot.answer_callback_query(call.id)
+    set_state(ADMIN_ID, step="adm_set_support")
+    bot.send_message(call.message.chat.id,
+        "🎧 یوزرنیم جدید پشتیبانی را ارسال کنید:\n\n"
+        "<i>مثال: ViraNetSupport (بدون @)</i>"
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_set_support")
+def adm_set_support(msg):
+    val = (msg.text or "").strip().lstrip("@")
+    if not val: return bot.send_message(msg.chat.id, "⚠️ یوزرنیم نمی‌تواند خالی باشد.")
+    save_setting("support_username", val); clear_state(ADMIN_ID)
+    bot.send_message(msg.chat.id, f"✅ یوزرنیم پشتیبانی به <b>@{val}</b> تغییر یافت.")
+
+# ── تست رایگان ───────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_free_trial" and c.from_user.id == ADMIN_ID)
+def cb_ap_free_trial(call):
+    bot.answer_callback_query(call.id)
+    status = "✅ فعال" if FREE_TRIAL_ENABLED else "❌ غیرفعال"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    toggle_lbl = "❌ غیرفعال کردن" if FREE_TRIAL_ENABLED else "✅ فعال کردن"
+    kb.add(types.InlineKeyboardButton(toggle_lbl,                  callback_data="ap_trial_toggle"))
+    kb.add(types.InlineKeyboardButton("📅 تعداد روز",              callback_data="ap_trial_days"))
+    kb.add(types.InlineKeyboardButton("📦 حجم (گیگابایت)",         callback_data="ap_trial_gb"))
+    kb.add(types.InlineKeyboardButton("🔐 کانفیگ تست رایگان",      callback_data="ap_trial_config"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",                callback_data="ap_settings"))
+    bot.send_message(call.message.chat.id,
+        "🎁 <b>تست رایگان</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"وضعیت: <b>{status}</b>\n"
+        f"⏱ مدت: <b>{FREE_TRIAL_DAYS} روز</b>\n"
+        f"📦 حجم: <b>{FREE_TRIAL_GB} گیگ</b>\n"
+        f"🔐 کانفیگ: {'<i>تنظیم شده</i>' if FREE_TRIAL_CONFIG else '<i>تنظیم نشده</i>'}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_toggle" and c.from_user.id == ADMIN_ID)
+def cb_ap_trial_toggle(call):
+    bot.answer_callback_query(call.id)
+    new_val = "0" if FREE_TRIAL_ENABLED else "1"
+    save_setting("free_trial_enabled", new_val)
+    status = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
+    bot.send_message(call.message.chat.id, f"🎁 تست رایگان {status} شد.")
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_days" and c.from_user.id == ADMIN_ID)
+def cb_ap_trial_days(call):
+    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_trial_days")
+    bot.send_message(call.message.chat.id,
+        f"📅 مدت فعلی: <b>{FREE_TRIAL_DAYS} روز</b>\n\n👇 تعداد روز جدید را وارد کنید:"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_gb" and c.from_user.id == ADMIN_ID)
+def cb_ap_trial_gb(call):
+    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_trial_gb")
+    bot.send_message(call.message.chat.id,
+        f"📦 حجم فعلی: <b>{FREE_TRIAL_GB} گیگ</b>\n\n👇 حجم جدید (گیگابایت) را وارد کنید:"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_config" and c.from_user.id == ADMIN_ID)
+def cb_ap_trial_config(call):
+    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_trial_config")
+    bot.send_message(call.message.chat.id,
+        "🔐 <b>کانفیگ تست رایگان</b>\n\n"
+        "لینک یا کانفیگ ارسالی به کاربران در تست رایگان را وارد کنید:\n\n"
+        "<i>مثال: vmess://... یا https://sub.domain.com/...</i>"
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") in ("adm_trial_days","adm_trial_gb","adm_trial_config"))
+def adm_trial_settings(msg):
+    step = get_state(ADMIN_ID)["step"]; val = (msg.text or "").strip()
+    if step == "adm_trial_days":
+        try:
+            d = int(val)
+            if d <= 0: raise ValueError
+        except ValueError:
+            return bot.send_message(msg.chat.id, "⚠️ عدد معتبر وارد کنید.")
+        save_setting("free_trial_days", str(d)); clear_state(ADMIN_ID)
+        bot.send_message(msg.chat.id, f"✅ مدت تست رایگان به <b>{d} روز</b> تغییر یافت.")
+    elif step == "adm_trial_gb":
+        try:
+            g = int(val)
+            if g <= 0: raise ValueError
+        except ValueError:
+            return bot.send_message(msg.chat.id, "⚠️ عدد معتبر وارد کنید.")
+        save_setting("free_trial_gb", str(g)); clear_state(ADMIN_ID)
+        bot.send_message(msg.chat.id, f"✅ حجم تست رایگان به <b>{g} گیگ</b> تغییر یافت.")
+    elif step == "adm_trial_config":
+        if not val: return bot.send_message(msg.chat.id, "⚠️ کانفیگ نمی‌تواند خالی باشد.")
+        save_setting("free_trial_config", val); clear_state(ADMIN_ID)
+        bot.send_message(msg.chat.id, "✅ کانفیگ تست رایگان ذخیره شد.")
+
+# ── متن‌های ربات ─────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_bot_texts" and c.from_user.id == ADMIN_ID)
+def cb_ap_bot_texts(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("✏️ تغییر متن خوش‌آمدگویی", callback_data="ap_set_welcome"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات", callback_data="ap_settings"))
+    preview = WELCOME_TEXT[:80] + "..." if len(WELCOME_TEXT) > 80 else (WELCOME_TEXT or "<i>پیش‌فرض ربات</i>")
+    bot.send_message(call.message.chat.id,
+        "📝 <b>متن‌های ربات</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👋 <b>متن خوش‌آمدگویی:</b>\n{preview}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_set_welcome" and c.from_user.id == ADMIN_ID)
+def cb_ap_set_welcome(call):
+    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_set_welcome")
+    bot.send_message(call.message.chat.id,
+        "👋 <b>متن خوش‌آمدگویی</b>\n\n"
+        "متن جدید را ارسال کنید. HTML پشتیبانی می‌شود.\n\n"
+        "<i>برای بازگشت به متن پیش‌فرض، کلمه «پیش‌فرض» را ارسال کنید.</i>"
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_set_welcome")
+def adm_set_welcome(msg):
+    val = (msg.text or "").strip()
+    if val == "پیش‌فرض": val = ""
+    save_setting("welcome_text", val); clear_state(ADMIN_ID)
+    bot.send_message(msg.chat.id, "✅ متن خوش‌آمدگویی ذخیره شد!" if val else "✅ متن به پیش‌فرض بازگشت.")
+
+# ── چیدمان منو استارت ─────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_start_menu" and c.from_user.id == ADMIN_ID)
+def cb_ap_start_menu(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("✏️ ویرایش متن خوش‌آمدگویی استارت", callback_data="ap_set_welcome"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات", callback_data="ap_settings"))
+    bot.send_message(call.message.chat.id,
+        "🧩 <b>چیدمان و متن های منو استارت</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "از این بخش می‌توانید متن پیام خوش‌آمدگویی که "
+        "هنگام /start نمایش داده می‌شود را ویرایش کنید.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+# ── مدیریت فروش ──────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_sales_settings" and c.from_user.id == ADMIN_ID)
+def cb_ap_sales_settings(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🎁 تغییر پاداش معرفی",    callback_data="ap_set_referral"))
+    kb.add(types.InlineKeyboardButton("💳 اطلاعات پرداخت",       callback_data="ap_card_settings"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",              callback_data="ap_settings"))
+    bot.send_message(call.message.chat.id,
+        "🤖 <b>مدیریت فروش</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎁 <b>پاداش معرفی:</b> {fmt(REFERRAL_BONUS)} تومان\n"
+        f"💳 <b>کارت:</b> {CARD_NUMBER}\n"
+        f"👤 <b>نام:</b> {CARD_OWNER}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_set_referral" and c.from_user.id == ADMIN_ID)
+def cb_ap_set_referral(call):
+    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_set_referral")
+    bot.send_message(call.message.chat.id,
+        f"🎁 پاداش فعلی معرفی: <b>{fmt(REFERRAL_BONUS)} تومان</b>\n\n"
+        "👇 مبلغ جدید پاداش (تومان) را وارد کنید:"
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_set_referral")
+def adm_set_referral(msg):
+    try:
+        val = int((msg.text or "").strip().replace(",",""))
+        if val < 0: raise ValueError
+    except ValueError:
+        return bot.send_message(msg.chat.id, "⚠️ مبلغ معتبر وارد کنید.")
+    save_setting("referral_bonus", str(val)); clear_state(ADMIN_ID)
+    bot.send_message(msg.chat.id, f"✅ پاداش معرفی به <b>{fmt(val)} تومان</b> تغییر یافت.")
+
+# ── لینک‌های دانلود اپلیکیشن ─────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_app_links" and c.from_user.id == ADMIN_ID)
+def cb_ap_app_links(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🍎 تنظیم لینک iOS",      callback_data="ap_set_ios"))
+    kb.add(types.InlineKeyboardButton("🤖 تنظیم لینک اندروید",  callback_data="ap_set_android"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",             callback_data="ap_settings"))
+    ios_txt     = f"<a href='{APP_LINK_IOS}'>لینک iOS</a>" if APP_LINK_IOS else "<i>تنظیم نشده</i>"
+    android_txt = f"<a href='{APP_LINK_ANDROID}'>لینک اندروید</a>" if APP_LINK_ANDROID else "<i>تنظیم نشده</i>"
+    bot.send_message(call.message.chat.id,
+        "📲 <b>دریافت اپلیکیشن‌ها</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🍎 iOS: {ios_txt}\n"
+        f"🤖 اندروید: {android_txt}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb, disable_web_page_preview=True
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data in ("ap_set_ios","ap_set_android") and c.from_user.id == ADMIN_ID)
+def cb_ap_set_app_link(call):
+    bot.answer_callback_query(call.id)
+    plat = "iOS" if call.data == "ap_set_ios" else "اندروید"
+    key  = "adm_set_ios" if call.data == "ap_set_ios" else "adm_set_android"
+    set_state(ADMIN_ID, step=key)
+    bot.send_message(call.message.chat.id, f"📲 لینک دانلود <b>{plat}</b> را ارسال کنید:")
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") in ("adm_set_ios","adm_set_android"))
+def adm_set_app_link(msg):
+    step = get_state(ADMIN_ID)["step"]; url = (msg.text or "").strip()
+    if not url.startswith("http"): return bot.send_message(msg.chat.id, "⚠️ لینک معتبر وارد کنید (باید با http شروع شود).")
+    if step == "adm_set_ios":
+        save_setting("app_link_ios", url); clear_state(ADMIN_ID)
+        bot.send_message(msg.chat.id, "✅ لینک iOS ذخیره شد.")
+    else:
+        save_setting("app_link_android", url); clear_state(ADMIN_ID)
+        bot.send_message(msg.chat.id, "✅ لینک اندروید ذخیره شد.")
+
+# ── مدیریت عملیات ربات ───────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_bot_ops" and c.from_user.id == ADMIN_ID)
+def cb_ap_bot_ops(call):
+    global BOT_ONLINE
+    bot.answer_callback_query(call.id)
+    status = "🟢 روشن" if BOT_ONLINE else "🔴 خاموش"
+    toggle_lbl = "🔴 خاموش کردن ربات" if BOT_ONLINE else "🟢 روشن کردن ربات"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(toggle_lbl, callback_data="ap_toggle_bot"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات", callback_data="ap_settings"))
+    bot.send_message(call.message.chat.id,
+        "⚙️ <b>مدیریت عملیات ربات</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📡 وضعیت فعلی: <b>{status}</b>\n\n"
+        "با خاموش کردن ربات، کاربران عادی قادر به استفاده نخواهند بود.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_toggle_bot" and c.from_user.id == ADMIN_ID)
+def cb_ap_toggle_bot(call):
+    global BOT_ONLINE
+    BOT_ONLINE = not BOT_ONLINE
+    status = "🟢 روشن" if BOT_ONLINE else "🔴 خاموش"
+    bot.answer_callback_query(call.id, f"ربات {status} شد", show_alert=True)
+    bot.send_message(call.message.chat.id, f"📡 وضعیت ربات → <b>{status}</b>")
+
+# ── مدیریت گروه ──────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_group" and c.from_user.id == ADMIN_ID)
+def cb_ap_group(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("✏️ تنظیم آیدی / یوزرنیم گروه", callback_data="ap_set_group"))
+    if GROUP_ID:
+        kb.add(types.InlineKeyboardButton("🗑️ حذف گروه",              callback_data="ap_del_group"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات", callback_data="ap_settings"))
+    grp_txt = f"<code>{GROUP_ID}</code>" if GROUP_ID else "<i>تنظیم نشده</i>"
+    bot.send_message(call.message.chat.id,
+        "🏢 <b>مدیریت گروه</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📌 گروه فعلی: {grp_txt}\n\n"
+        "با تنظیم گروه، ربات می‌تواند اعلان‌ها را در آن ارسال کند.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_set_group" and c.from_user.id == ADMIN_ID)
+def cb_ap_set_group(call):
+    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_set_group")
+    bot.send_message(call.message.chat.id,
+        "🏢 آیدی عددی یا یوزرنیم گروه را ارسال کنید:\n\n"
+        "<i>مثال: @MyGroup یا -1001234567890</i>"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_del_group" and c.from_user.id == ADMIN_ID)
+def cb_ap_del_group(call):
+    bot.answer_callback_query(call.id)
+    save_setting("group_id", "")
+    bot.send_message(call.message.chat.id, "✅ گروه حذف شد.")
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_set_group")
+def adm_set_group(msg):
+    val = (msg.text or "").strip()
+    if not val: return bot.send_message(msg.chat.id, "⚠️ مقدار نمی‌تواند خالی باشد.")
+    save_setting("group_id", val); clear_state(ADMIN_ID)
+    bot.send_message(msg.chat.id, f"✅ گروه به <code>{val}</code> تنظیم شد.")
+
+# ── مدیریت پنل VPN ───────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_vpn_panel" and c.from_user.id == ADMIN_ID)
+def cb_ap_vpn_panel(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🌐 تنظیم آدرس پنل",      callback_data="ap_set_panel_url"))
+    kb.add(types.InlineKeyboardButton("🔑 تنظیم توکن/API Key",   callback_data="ap_set_panel_token"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",              callback_data="ap_settings"))
+    url_txt   = f"<code>{PANEL_URL}</code>"   if PANEL_URL   else "<i>تنظیم نشده</i>"
+    token_txt = f"<code>{'*' * min(len(PANEL_TOKEN), 8)}...</code>" if PANEL_TOKEN else "<i>تنظیم نشده</i>"
+    bot.send_message(call.message.chat.id,
+        "🎮 <b>مدیریت پنل VPN</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🌐 آدرس پنل: {url_txt}\n"
+        f"🔑 توکن: {token_txt}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data in ("ap_set_panel_url","ap_set_panel_token") and c.from_user.id == ADMIN_ID)
+def cb_ap_set_panel(call):
+    bot.answer_callback_query(call.id)
+    if call.data == "ap_set_panel_url":
+        set_state(ADMIN_ID, step="adm_set_panel_url")
+        bot.send_message(call.message.chat.id,
+            "🌐 آدرس پنل را وارد کنید:\n\n"
+            "<i>مثال: https://panel.example.com</i>"
+        )
+    else:
+        set_state(ADMIN_ID, step="adm_set_panel_token")
+        bot.send_message(call.message.chat.id,
+            "🔑 توکن یا API Key پنل را وارد کنید:\n\n"
+            "<i>این مقدار بصورت رمزگذاری شده ذخیره می‌شود.</i>"
+        )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") in ("adm_set_panel_url","adm_set_panel_token"))
+def adm_set_panel(msg):
+    step = get_state(ADMIN_ID)["step"]; val = (msg.text or "").strip()
+    if not val: return bot.send_message(msg.chat.id, "⚠️ مقدار نمی‌تواند خالی باشد.")
+    if step == "adm_set_panel_url":
+        if not val.startswith("http"): return bot.send_message(msg.chat.id, "⚠️ آدرس باید با http شروع شود.")
+        save_setting("panel_url", val); clear_state(ADMIN_ID)
+        bot.send_message(msg.chat.id, f"✅ آدرس پنل ذخیره شد:\n<code>{val}</code>")
+    else:
+        save_setting("panel_token", val); clear_state(ADMIN_ID)
+        bot.send_message(msg.chat.id, "✅ توکن پنل ذخیره شد.")
+
+# ── مدیریت اعلان‌ها ───────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_notifications" and c.from_user.id == ADMIN_ID)
+def cb_ap_notifications(call):
+    bot.answer_callback_query(call.id)
+    u_icon = "✅" if NOTIFY_NEW_USER  else "❌"
+    o_icon = "✅" if NOTIFY_NEW_ORDER else "❌"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(f"{u_icon} اعلان کاربر جدید",   callback_data="ap_notif_user"))
+    kb.add(types.InlineKeyboardButton(f"{o_icon} اعلان سفارش جدید",   callback_data="ap_notif_order"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",                    callback_data="ap_settings"))
+    bot.send_message(call.message.chat.id,
+        "🔔 <b>مدیریت اعلان‌ها</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{u_icon} اعلان عضو جدید: <b>{'فعال' if NOTIFY_NEW_USER else 'غیرفعال'}</b>\n"
+        f"{o_icon} اعلان سفارش جدید: <b>{'فعال' if NOTIFY_NEW_ORDER else 'غیرفعال'}</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data in ("ap_notif_user","ap_notif_order") and c.from_user.id == ADMIN_ID)
+def cb_ap_toggle_notif(call):
+    bot.answer_callback_query(call.id)
+    if call.data == "ap_notif_user":
+        new_val = "0" if NOTIFY_NEW_USER else "1"
+        save_setting("notify_new_user", new_val)
+        lbl = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
+        bot.send_message(call.message.chat.id, f"🔔 اعلان کاربر جدید: <b>{lbl}</b>")
+    else:
+        new_val = "0" if NOTIFY_NEW_ORDER else "1"
+        save_setting("notify_new_order", new_val)
+        lbl = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
+        bot.send_message(call.message.chat.id, f"🔔 اعلان سفارش جدید: <b>{lbl}</b>")
+
+# ── پاکسازی داده‌ها ───────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_cleanup" and c.from_user.id == ADMIN_ID)
+def cb_ap_cleanup(call):
+    bot.answer_callback_query(call.id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🗑️ حذف رسیدهای تأیید/رد شده قدیمی", callback_data="ap_clean_receipts"))
+    kb.add(types.InlineKeyboardButton("🗑️ حذف سفارش‌های قدیمی تحویل‌داده",  callback_data="ap_clean_orders"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",                          callback_data="ap_settings"))
+    with get_db() as conn:
+        rc = conn.execute("SELECT COUNT(*) as c FROM receipts WHERE status IN ('approved','rejected')").fetchone()["c"]
+        oc = conn.execute("SELECT COUNT(*) as c FROM orders WHERE status='delivered'").fetchone()["c"]
+    bot.send_message(call.message.chat.id,
+        "🗑️ <b>پاکسازی داده‌ها</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📋 رسیدهای پردازش‌شده: <b>{rc} مورد</b>\n"
+        f"📦 سفارش‌های تحویل‌داده: <b>{oc} مورد</b>\n\n"
+        "⚠️ این عملیات قابل بازگشت نیست!\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data in ("ap_clean_receipts","ap_clean_orders") and c.from_user.id == ADMIN_ID)
+def cb_ap_clean(call):
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        if call.data == "ap_clean_receipts":
+            n = conn.execute("SELECT COUNT(*) as c FROM receipts WHERE status IN ('approved','rejected')").fetchone()["c"]
+            conn.execute("DELETE FROM receipts WHERE status IN ('approved','rejected')"); conn.commit()
+            bot.send_message(call.message.chat.id, f"✅ <b>{n} رسید</b> قدیمی حذف شد.")
+        else:
+            n = conn.execute("SELECT COUNT(*) as c FROM orders WHERE status='delivered'").fetchone()["c"]
+            conn.execute("DELETE FROM orders WHERE status='delivered'"); conn.commit()
+            bot.send_message(call.message.chat.id, f"✅ <b>{n} سفارش</b> قدیمی حذف شد.")
+
+# ── کاربران مسدود ─────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_banned" and c.from_user.id == ADMIN_ID)
+def cb_ap_banned(call):
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        users = conn.execute("SELECT * FROM users WHERE is_banned=1 ORDER BY id DESC").fetchall()
+    if not users:
+        return bot.send_message(call.message.chat.id,
+            "🚫 <b>کاربران مسدود</b>\n\n✅ هیچ کاربر مسدودی وجود ندارد."
+        )
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for u in users[:15]:
+        label = f"🚫 @{u['username'] or u['full_name'] or u['user_id']}"
+        kb.add(types.InlineKeyboardButton(label, callback_data=f"ap_user_{u['user_id']}"))
+    kb.add(types.InlineKeyboardButton("🔙 پنل ادمین", callback_data="menu_admin"))
+    bot.send_message(call.message.chat.id,
+        f"🚫 <b>کاربران مسدود ({len(users)} نفر)</b>\n\n"
+        "برای مدیریت روی کاربر بزنید:",
+        reply_markup=kb
+    )
+
+# ── آمار فروش ─────────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_sales" and c.from_user.id == ADMIN_ID)
+def cb_ap_sales(call):
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        total_rev  = conn.execute("SELECT SUM(total_price) as s FROM orders WHERE status='delivered'").fetchone()["s"] or 0
+        today_rev  = conn.execute(
+            "SELECT SUM(total_price) as s FROM orders WHERE status='delivered' AND DATE(created_at)=DATE('now')"
+        ).fetchone()["s"] or 0
+        week_rev   = conn.execute(
+            "SELECT SUM(total_price) as s FROM orders WHERE status='delivered' AND created_at>=datetime('now','-7 days')"
+        ).fetchone()["s"] or 0
+        total_ord  = conn.execute("SELECT COUNT(*) as c FROM orders WHERE status='delivered'").fetchone()["c"]
+        today_ord  = conn.execute(
+            "SELECT COUNT(*) as c FROM orders WHERE status='delivered' AND DATE(created_at)=DATE('now')"
+        ).fetchone()["c"]
+        pend_ord   = conn.execute("SELECT COUNT(*) as c FROM orders WHERE status='pending'").fetchone()["c"]
+        top_plans  = conn.execute(
+            "SELECT plan_key, COUNT(*) as cnt FROM orders WHERE status='delivered' GROUP BY plan_key ORDER BY cnt DESC LIMIT 3"
+        ).fetchall()
+    top_txt = ""
+    for i, p in enumerate(top_plans, 1):
+        plan_label = PLANS.get(p["plan_key"], {}).get("label", p["plan_key"])
+        top_txt += f"  {i}. {plan_label} — {p['cnt']} عدد\n"
+    bot.send_message(call.message.chat.id,
+        "📈 <b>آمار فروش</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💰 <b>درآمد امروز:</b> {fmt(today_rev)} تومان ({today_ord} سفارش)\n"
+        f"💰 <b>درآمد ۷ روز:</b> {fmt(week_rev)} تومان\n"
+        f"💰 <b>کل درآمد:</b> {fmt(total_rev)} تومان\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📦 <b>کل سفارش تحویل:</b> {total_ord}\n"
+        f"⏳ <b>سفارش در انتظار:</b> {pend_ord}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏆 <b>پرفروش‌ترین پلن‌ها:</b>\n{top_txt or '  —  داده‌ای موجود نیست'}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
 
 @bot.callback_query_handler(func=lambda c: c.data == "ap_card_settings" and c.from_user.id == ADMIN_ID)
 def cb_ap_card_settings(call):
