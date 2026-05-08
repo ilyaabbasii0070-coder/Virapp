@@ -32,6 +32,11 @@ WEBAPP_URL     = os.environ.get("WEBAPP_URL", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 
+FORCE_CHANNELS = os.environ.get(
+    "FORCE_CHANNELS",
+    "@ViraNet"
+).split(",")
+
 SUPPORT_USERNAME = "ViraNet0"
 REFERRAL_BONUS   = 5000
 AGENCY_MIN_WALLET = 1  # حداقل ۱ تومان برای درخواست نمایندگی
@@ -95,6 +100,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY, value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS force_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_username TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS agency_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
             bot_token TEXT NOT NULL, status TEXT DEFAULT 'pending',
@@ -103,6 +114,10 @@ def init_db():
         """)
         try:
             conn.execute("ALTER TABLE order_services ADD COLUMN sub_link TEXT")
+            conn.commit()
+        except Exception: pass
+        try:
+            conn.execute("ALTER TABLE agency_requests ADD COLUMN agent_chat_id INTEGER")
             conn.commit()
         except Exception: pass
 
@@ -194,6 +209,91 @@ def safe_delete(chat_id, message_id):
         bot.delete_message(chat_id, message_id)
     except Exception:
         pass
+
+# ── دریافت اطلاعات مصرف از ساب‌لینک ──────────────
+def get_sub_info(sub_link: str) -> dict:
+    """
+    اطلاعات مصرف را از هدر subscription-userinfo ساب‌لینک می‌خواند.
+    فرمت استاندارد پنل‌های مختلف (Marzban, X-UI, Hiddify, ...):
+      subscription-userinfo: upload=X; download=Y; total=Z; expire=T
+    برمی‌گرداند دیکشنری با کلیدهای:
+      upload, download, total, expire, remaining_bytes, remaining_days, used_bytes
+    در صورت خطا، None برمی‌گرداند.
+    """
+    if not sub_link or not sub_link.startswith("http"):
+        return None
+    try:
+        r = requests.get(sub_link, timeout=8,
+                         headers={"User-Agent": "clash-meta"})
+        info_header = (
+            r.headers.get("subscription-userinfo") or
+            r.headers.get("Subscription-Userinfo") or ""
+        )
+        if not info_header:
+            return None
+        data = {}
+        for part in info_header.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                try:
+                    data[k.strip()] = int(v.strip())
+                except Exception:
+                    pass
+        upload   = data.get("upload", 0)
+        download = data.get("download", 0)
+        total    = data.get("total", 0)
+        expire   = data.get("expire", 0)
+        used     = upload + download
+        remaining_bytes = max(0, total - used)
+        now_ts   = int(time.time())
+        remaining_days = max(0, (expire - now_ts) // 86400) if expire else 0
+        return {
+            "upload": upload,
+            "download": download,
+            "used_bytes": used,
+            "total": total,
+            "remaining_bytes": remaining_bytes,
+            "expire": expire,
+            "remaining_days": remaining_days,
+        }
+    except Exception as e:
+        print(f"[sub_info] {e}")
+        return None
+
+def _fmt_bytes(b: int) -> str:
+    """تبدیل بایت به واحد خوانا"""
+    if b >= 1024 ** 3:
+        return f"{b / 1024**3:.2f} GB"
+    if b >= 1024 ** 2:
+        return f"{b / 1024**2:.1f} MB"
+    if b >= 1024:
+        return f"{b / 1024:.0f} KB"
+    return f"{b} B"
+
+def _build_usage_text(info: dict) -> str:
+    """ساخت متن نمایش آمار مصرف"""
+    if not info:
+        return "⚠️ <i>اطلاعات مصرف در دسترس نیست</i>\n"
+    total_fmt     = _fmt_bytes(info["total"]) if info["total"] else "نامحدود"
+    used_fmt      = _fmt_bytes(info["used_bytes"])
+    remaining_fmt = _fmt_bytes(info["remaining_bytes"])
+    pct = 0
+    if info["total"] > 0:
+        pct = min(100, int(info["used_bytes"] * 100 / info["total"]))
+    bar_len = 10
+    filled  = int(bar_len * pct / 100)
+    bar     = "█" * filled + "░" * (bar_len - filled)
+    days    = info["remaining_days"]
+    expire_line = f"{days} روز" if days > 0 else "⏰ منقضی شده"
+    return (
+        "📊 <b>آمار مصرف</b>\n\n"
+        f"📦 <b>کل حجم:</b>  {total_fmt}\n"
+        f"🔻 <b>مصرف شده:</b>  {used_fmt}  ({pct}٪)\n"
+        f"✅ <b>باقی‌مانده:</b>  {remaining_fmt}\n\n"
+        f"<code>[{bar}]</code>  {pct}٪\n\n"
+        f"⏳ <b>زمان باقی‌مانده:</b>  {expire_line}\n"
+    )
 
 # ── قیمت TRX ──────────────────────────────────
 def get_trx_price_usd():
@@ -301,6 +401,94 @@ OFFLINE_MSG = (
 
 def is_offline_for(uid): return not BOT_ONLINE and uid != ADMIN_ID
 
+# ───────── عضو اجباری ─────────
+
+def get_force_channels():
+
+    with get_db() as conn:
+
+        rows = conn.execute(
+            "SELECT channel_username FROM force_channels"
+        ).fetchall()
+
+    return [r["channel_username"] for r in rows]
+
+
+def add_force_channel(channel):
+
+    with get_db() as conn:
+
+        conn.execute(
+            "INSERT INTO force_channels(channel_username) VALUES(?)",
+            (channel,)
+        )
+
+        conn.commit()
+
+
+def remove_force_channel(channel):
+
+    with get_db() as conn:
+
+        conn.execute(
+            "DELETE FROM force_channels WHERE channel_username=?",
+            (channel,)
+        )
+
+        conn.commit()
+
+
+def is_joined(user_id):
+
+    try:
+
+        channels = get_force_channels()
+
+        if not channels:
+            return True
+
+        for channel in channels:
+
+            member = bot.get_chat_member(channel, user_id)
+
+            if member.status not in [
+                "member",
+                "administrator",
+                "creator"
+            ]:
+                return False
+
+        return True
+
+    except Exception as e:
+        print("JOIN ERROR:", e)
+        return False
+
+
+def join_required_markup():
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+
+    channels = get_force_channels()
+
+    for channel in channels:
+
+        kb.add(
+            types.InlineKeyboardButton(
+                f"📢 {channel}",
+                url=f"https://t.me/{channel.replace('@','')}"
+            )
+        )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "✅ عضو شدم",
+            callback_data="check_join"
+        )
+    )
+
+    return kb
+
 # ── Main Menu ──────────────────────────────────
 def main_menu_kb(user_id):
     kb = types.InlineKeyboardMarkup(row_width=2)
@@ -352,6 +540,24 @@ def send_main_menu(chat_id, user_id, text=None, delete_msg_id=None):
 def cmd_start(msg):
     if is_offline_for(msg.from_user.id):
         return bot.send_message(msg.chat.id, OFFLINE_MSG)
+
+    if not is_joined(msg.from_user.id):
+        channels = get_force_channels()
+        ch_count = len(channels)
+        return bot.send_message(
+            msg.chat.id,
+            "👋 <b>به ویرا نت خوش آمدید!</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🔒 <b>برای استفاده از ربات، ابتدا باید در</b> "
+            f"<b>{ch_count} کانال</b> زیر عضو شوید:\n\n"
+            "📌 مراحل:\n"
+            f"   1️⃣  روی {'دکمه کانال' if ch_count == 1 else 'دکمه‌های کانال'} زیر بزنید\n"
+            "   2️⃣  عضو کانال شوید\n"
+            "   3️⃣  دکمه ✅ <b>عضو شدم</b> را بزنید\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "💎 بعد از عضویت، به تمام امکانات ربات دسترسی خواهید داشت.",
+            reply_markup=join_required_markup()
+        )
     args = msg.text.split()
     referred_by = None
     if len(args) > 1 and args[1].startswith("ref_"):
@@ -385,6 +591,37 @@ def cmd_start(msg):
 # ─────────────────────────────────────────────
 #  MENU CALLBACKS
 # ─────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "check_join")
+def cb_check_join(call):
+
+    if is_joined(call.from_user.id):
+
+        bot.answer_callback_query(
+            call.id,
+            "✅ عضویت تایید شد"
+        )
+
+        safe_delete(
+            call.message.chat.id,
+            call.message.message_id
+        )
+
+        send_main_menu(
+            call.message.chat.id,
+            call.from_user.id,
+            "🎉 خوش آمدید"
+        )
+
+    else:
+
+        bot.answer_callback_query(
+            call.id,
+            "❌ هنوز عضو همه کانال‌ها نشدید",
+            show_alert=True
+        )
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "menu_shop")
 def cb_menu_shop(call):
     if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
@@ -573,9 +810,10 @@ def cb_agency(call):
         "   1️⃣  یک ربات جدید از @BotFather بسازید\n"
         "   2️⃣  توکن ربات را دریافت کنید\n"
         "   3️⃣  توکن را اینجا ارسال کنید\n"
-        "   4️⃣  منتظر تایید ادمین باشید\n\n"
+        "   4️⃣  آیدی عددی تلگرام خود را ارسال کنید\n"
+        "   5️⃣  منتظر تایید ادمین باشید\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👇 <b>توکن ربات خود را ارسال کنید:</b>\n"
+        "👇 <b>مرحله ۱: توکن ربات خود را ارسال کنید:</b>\n"
         "<i>(مثال: 1234567890:ABCdef...)</i>",
         reply_markup=kb
     )
@@ -591,12 +829,47 @@ def agency_token_input(msg):
             "👇 لطفاً توکن صحیح ارسال کنید:"
         )
     uid = msg.from_user.id
+    # توکن رو ذخیره کن و آیدی عددی رو بخواه
+    set_state(uid, step="agency_chat_id", agency_token=token)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="back_main"))
+    bot.send_message(msg.chat.id,
+        "✅ <b>توکن دریافت شد!</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📌 <b>مرحله ۲:</b> آیدی عددی تلگرام خود را ارسال کنید\n\n"
+        "💡 <b>چطور آیدی عددی خود را بدست آورم؟</b>\n\n"
+        "   ➊ به ربات <b>@userinfobot</b> پیام بزنید\n"
+        "   ➋ آیدی عددی (مثلاً <code>123456789</code>) را کپی کنید\n"
+        "   ➌ اینجا ارسال کنید\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 <b>آیدی عددی خود را ارسال کنید:</b>",
+        reply_markup=kb
+    )
+
+@bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "agency_chat_id")
+def agency_chat_id_input(msg):
+    if is_offline_for(msg.from_user.id): return bot.send_message(msg.chat.id, OFFLINE_MSG)
+    text = (msg.text or "").strip()
+    try:
+        agent_chat_id = int(text)
+        if agent_chat_id <= 0: raise ValueError
+    except ValueError:
+        return bot.send_message(msg.chat.id,
+            "⚠️ <b>آیدی نامعتبر!</b>\n\n"
+            "آیدی باید یک عدد باشد مثلاً: <code>123456789</code>\n\n"
+            "👇 دوباره ارسال کنید:"
+        )
+    uid = msg.from_user.id
+    state = get_state(uid)
+    token = state.get("agency_token", "")
     u = get_user(uid); uname = u["username"] or u["full_name"] or str(uid)
 
     # ذخیره در DB
     with get_db() as conn:
-        cur = conn.execute("INSERT INTO agency_requests(user_id,bot_token,status) VALUES(?,?,?)",
-                           (uid, token, "pending"))
+        cur = conn.execute(
+            "INSERT INTO agency_requests(user_id,bot_token,agent_chat_id,status) VALUES(?,?,?,?)",
+            (uid, token, agent_chat_id, "pending")
+        )
         req_id = cur.lastrowid; conn.commit()
 
     # ارسال به ادمین
@@ -613,6 +886,7 @@ def agency_token_input(msg):
         f"🕐 <b>زمان:</b> {now_str()}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🤖 <b>توکن ربات:</b>\n<code>{token}</code>\n\n"
+        f"🆔 <b>آیدی عددی نماینده:</b> <code>{agent_chat_id}</code>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👇 درخواست را تایید یا رد کنید:",
         reply_markup=adm_kb
@@ -646,9 +920,10 @@ def cb_agency_approve(call):
         conn.execute("UPDATE agency_requests SET status='approved' WHERE id=?", (req_id,))
         conn.commit()
     token = req["bot_token"]; uid = req["user_id"]
+    agent_chat_id = req["agent_chat_id"] if req["agent_chat_id"] else uid
 
     # راه‌اندازی ربات نمایندگی در thread جداگانه
-    def run_agent_bot(agent_token, owner_id):
+    def run_agent_bot(agent_token, owner_id, owner_chat_id):
         try:
             agent = telebot.TeleBot(agent_token, parse_mode="HTML")
 
@@ -666,8 +941,8 @@ def cb_agency_approve(call):
             @agent.message_handler(func=lambda m: True, content_types=['text','photo','document'])
             def agent_fallback(msg):
                 try:
-                    bot.forward_message(ADMIN_ID, msg.chat.id, msg.message_id)
-                    bot.send_message(ADMIN_ID, f"📨 پیام از ربات نمایندگی\n👤 <code>{msg.from_user.id}</code>\n🤖 مالک: <code>{owner_id}</code>")
+                    agent.forward_message(owner_chat_id, msg.chat.id, msg.message_id)
+                    agent.send_message(owner_chat_id, f"📨 پیام جدید در ربات شما\n👤 <code>{msg.from_user.id}</code>")
                 except Exception: pass
 
             agent_bots[agent_token] = agent
@@ -675,7 +950,7 @@ def cb_agency_approve(call):
         except Exception as e:
             print(f"[agent bot] Error: {e}")
 
-    t = threading.Thread(target=run_agent_bot, args=(token, uid), daemon=True)
+    t = threading.Thread(target=run_agent_bot, args=(token, uid, agent_chat_id), daemon=True)
     t.start()
 
     # پاک کردن پیام ادمین
@@ -1375,26 +1650,30 @@ def _show_my_services(chat_id, user_id):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("vs_"))
-def cb_view_svc(call):
-    svc_id = int(call.data[3:])
-    with get_db() as conn:
-        svc = conn.execute("SELECT * FROM order_services WHERE id=? AND user_id=?", (svc_id, call.from_user.id)).fetchone()
-    if not svc: return bot.answer_callback_query(call.id, "سرویس یافت نشد", show_alert=True)
-    plan = PLANS.get(svc["plan_key"], {}); bot.answer_callback_query(call.id)
+def _build_svc_message(svc, plan, fetch_usage=True):
+    """ساخت متن و keyboard جزئیات سرویس"""
     sub = svc["sub_link"] or ""
     kb = types.InlineKeyboardMarkup(row_width=1)
-    if sub.startswith("http"): kb.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=sub))
+    if sub.startswith("http"):
+        kb.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=sub))
+        kb.add(types.InlineKeyboardButton("🔄 بروزرسانی آمار مصرف", callback_data=f"vs_{svc['id']}"))
     kb.add(types.InlineKeyboardButton("✏️ تغییر نام", callback_data=f"rename_{svc['id']}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="menu_services"))
-    safe_delete(call.message.chat.id, call.message.message_id)
+
     text = (
         f"📦 <b>جزئیات سرویس</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🏷️ <b>نام:</b>  {svc['service_name']}\n"
-        f"📊 <b>حجم:</b>  {plan.get('gb','?')} GB\n"
-        f"📅 <b>مدت:</b>  {plan.get('days','?')} روز\n\n"
+        f"🏷️ <b>نام:</b>  {html_lib.escape(svc['service_name'])}\n"
+        f"📊 <b>پلن:</b>  {plan.get('gb','?')} GB | {plan.get('days','?')} روز\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+
+    if sub.startswith("http") and fetch_usage:
+        info = get_sub_info(sub)
+        text += _build_usage_text(info)
+        text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    text += (
         "🔐 <b>کانفیگ</b>  👆 <i>بزنید تا کپی شود</i>\n\n"
         f"<code>{svc['config_text']}</code>\n\n"
     )
@@ -1404,6 +1683,18 @@ def cb_view_svc(call):
             f"🔗 <b>ساب‌لینک</b>  👆 <i>بزنید تا کپی شود</i>\n\n"
             f"<code>{html_lib.escape(sub)}</code>\n\n"
         )
+    return text, kb
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("vs_"))
+def cb_view_svc(call):
+    svc_id = int(call.data[3:])
+    with get_db() as conn:
+        svc = conn.execute("SELECT * FROM order_services WHERE id=? AND user_id=?", (svc_id, call.from_user.id)).fetchone()
+    if not svc: return bot.answer_callback_query(call.id, "سرویس یافت نشد", show_alert=True)
+    plan = PLANS.get(svc["plan_key"], {})
+    bot.answer_callback_query(call.id, "⏳ در حال دریافت اطلاعات...")
+    safe_delete(call.message.chat.id, call.message.message_id)
+    text, kb = _build_svc_message(svc, plan, fetch_usage=True)
     bot.send_message(call.message.chat.id, text, reply_markup=kb)
 
 # ─────────────────────────────────────────────
@@ -1567,6 +1858,8 @@ def _show_admin_panel(chat_id):
         types.InlineKeyboardButton("📊 آمار کلی",         callback_data="ap_stats"),
         types.InlineKeyboardButton("📋 رسیدهای معلق",    callback_data="ap_pending"),
         types.InlineKeyboardButton("🤝 درخواست‌های نمایندگی", callback_data="ap_agency"),
+        types.InlineKeyboardButton("📢 عضو اجباری",       callback_data="admin_force_join"),
+        types.InlineKeyboardButton("📣 پیام بات",          callback_data="ap_broadcast"),
         types.InlineKeyboardButton("⚙️ تنظیمات",          callback_data="ap_settings"),
     )
     bot.send_message(chat_id,
@@ -1575,6 +1868,86 @@ def _show_admin_panel(chat_id):
         "👇 گزینه مورد نظر را انتخاب کنید:",
         reply_markup=kb
     )
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_force_join")
+def cb_admin_force_join(call):
+
+    if call.from_user.id != ADMIN_ID:
+        return
+
+    channels = get_force_channels()
+
+    text = "📢 <b>مدیریت عضو اجباری</b>\n\n"
+
+    if channels:
+
+        for ch in channels:
+            text += f"• {ch}\n"
+
+    else:
+
+        text += "❌ هیچ کانالی ثبت نشده\n"
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "➕ افزودن کانال",
+            callback_data="add_force_channel"
+        )
+    )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "➖ حذف کانال",
+            callback_data="remove_force_channel"
+        )
+    )
+
+    kb.add(
+        types.InlineKeyboardButton(
+            "🔙 بازگشت",
+            callback_data="menu_admin"
+        )
+    )
+
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "add_force_channel")
+def cb_add_force_channel(call):
+
+    if call.from_user.id != ADMIN_ID:
+        return
+
+    set_state(call.from_user.id, action="add_force_channel")
+
+    bot.send_message(
+        call.message.chat.id,
+        "📢 یوزرنیم کانال را ارسال کنید\n\nمثال:\n@ViraNet"
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "remove_force_channel")
+def cb_remove_force_channel(call):
+
+    if call.from_user.id != ADMIN_ID:
+        return
+
+    set_state(call.from_user.id, action="remove_force_channel")
+
+    bot.send_message(
+        call.message.chat.id,
+        "➖ یوزرنیم کانال را ارسال کنید"
+    )
+
+
 
 @bot.callback_query_handler(func=lambda c: c.data == "ap_agency" and c.from_user.id == ADMIN_ID)
 def cb_ap_agency(call):
@@ -1601,6 +1974,48 @@ def cb_ap_agency(call):
             f"🤖 توکن: <code>{r['bot_token']}</code>",
             reply_markup=adm_kb
         )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_broadcast" and c.from_user.id == ADMIN_ID)
+def cb_ap_broadcast(call):
+    bot.answer_callback_query(call.id)
+    set_state(ADMIN_ID, step="adm_broadcast")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="menu_admin"))
+    with get_db() as conn:
+        user_count = conn.execute("SELECT COUNT(*) as c FROM users WHERE is_banned=0").fetchone()["c"]
+    bot.send_message(call.message.chat.id,
+        "📣 <b>ارسال پیام گروهی به کاربران</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 <b>تعداد کاربران:</b> {user_count} نفر\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📝 پیام خود را بنویسید:\n\n"
+        "<i>✅ HTML پشتیبانی می‌شود مثلاً <b>bold</b>, <i>italic</i>, <code>code</code></i>",
+        reply_markup=kb
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_broadcast")
+def adm_broadcast_send(msg):
+    text = msg.text or msg.caption or ""
+    if not text.strip():
+        return bot.send_message(msg.chat.id, "⚠️ پیام نمی‌تواند خالی باشد.")
+    clear_state(ADMIN_ID)
+    with get_db() as conn:
+        users = conn.execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
+    success = 0; fail = 0
+    for u in users:
+        try:
+            bot.send_message(u["user_id"], text, parse_mode="HTML")
+            success += 1
+        except Exception:
+            fail += 1
+        time.sleep(0.05)
+    bot.send_message(msg.chat.id,
+        f"📣 <b>پیام گروهی ارسال شد!</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ <b>ارسال موفق:</b> {success} نفر\n"
+        f"❌ <b>ارسال ناموفق:</b> {fail} نفر\n\n"
+        f"📊 <b>کل:</b> {success+fail} نفر"
+    )
 
 @bot.callback_query_handler(func=lambda c: c.data == "ap_settings" and c.from_user.id == ADMIN_ID)
 def cb_ap_settings(call):
@@ -1956,6 +2371,37 @@ def cb_ap_pending(call):
 @bot.message_handler(content_types=["text"], func=lambda m: True)
 def fallback(msg):
     if is_offline_for(msg.from_user.id): return bot.send_message(msg.chat.id, OFFLINE_MSG)
+
+    state = get_state(msg.from_user.id)
+
+    if msg.from_user.id == ADMIN_ID:
+
+        if state.get("action") == "add_force_channel":
+
+            channel = msg.text.strip()
+
+            add_force_channel(channel)
+
+            clear_state(msg.from_user.id)
+
+            return bot.send_message(
+                msg.chat.id,
+                "✅ کانال اضافه شد"
+            )
+
+        if state.get("action") == "remove_force_channel":
+
+            channel = msg.text.strip()
+
+            remove_force_channel(channel)
+
+            clear_state(msg.from_user.id)
+
+            return bot.send_message(
+                msg.chat.id,
+                "✅ کانال حذف شد"
+            )
+
     u = get_user(msg.from_user.id)
     if u and u["is_banned"]: return
     if get_state(msg.from_user.id).get("step"): return
