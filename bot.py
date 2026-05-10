@@ -48,6 +48,7 @@ BOT_ONLINE  = True
 PLANS: dict = {}
 crypto_stop_events: dict = {}
 agent_bots: dict = {}
+_svc_refresh: dict = {}  # user_id → threading.Event (auto-refresh usage)
 
 FREE_TRIAL_ENABLED = False
 FREE_TRIAL_DAYS    = 1
@@ -135,6 +136,10 @@ def init_db():
         except Exception: pass
         try:
             conn.execute("ALTER TABLE agency_requests ADD COLUMN agent_chat_id INTEGER")
+            conn.commit()
+        except Exception: pass
+        try:
+            conn.execute("ALTER TABLE wallet_requests ADD COLUMN file_id TEXT")
             conn.commit()
         except Exception: pass
 
@@ -452,6 +457,8 @@ def clear_state(uid):
     user_states.pop(uid, None)
     if uid in crypto_stop_events:
         crypto_stop_events[uid].set(); del crypto_stop_events[uid]
+    if uid in _svc_refresh:
+        _svc_refresh[uid].set(); del _svc_refresh[uid]
 
 # ─────────────────────────────────────────────
 #  BOT
@@ -577,8 +584,8 @@ def main_menu_kb(user_id):
         types.InlineKeyboardButton("🎁 دعوت دوستان",        callback_data="menu_referral"),
         types.InlineKeyboardButton("🌐 پنل کاربری",         callback_data="menu_panel"),
     )
-    # ردیف ۵: پشتیبانی (قرمز)
-    kb.add(types.InlineKeyboardButton("🔴 🆘 پشتیبانی",    url=f"https://t.me/{SUPPORT_USERNAME}"))
+    # ردیف ۵: پشتیبانی هوشمند
+    kb.add(types.InlineKeyboardButton("🤖 پشتیبانی هوشمند", callback_data="menu_smart_support"))
     # ردیف ۶: درخواست نمایندگی
     kb.add(types.InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="menu_agency"))
 
@@ -1522,6 +1529,22 @@ def cb_adm_done(call):
 def cb_admin_reject(call):
     if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     order_id = int(call.data[8:]); bot.answer_callback_query(call.id)
+    set_state(ADMIN_ID, step="adm_rej_reason", order_id=order_id)
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="menu_admin"))
+    bot.send_message(call.message.chat.id,
+        f"📝 <b>دلیل رد سفارش #{order_id}</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "دلیل رد رسید را بنویسید تا برای کاربر ارسال شود:",
+        reply_markup=kb
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_rej_reason")
+def adm_rej_reason_handler(msg):
+    reason = (msg.text or "").strip()
+    if not reason: return bot.send_message(msg.chat.id, "⚠️ دلیل نمی‌تواند خالی باشد.")
+    state = get_state(ADMIN_ID); order_id = state.get("order_id")
+    clear_state(ADMIN_ID)
     with get_db() as conn:
         order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
         conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (order_id,))
@@ -1532,16 +1555,12 @@ def cb_admin_reject(call):
         bot.send_message(order["user_id"],
             "❌ <b>رسید شما رد شد</b> 😔\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "متأسفانه رسید ارسالی شما تایید نشد.\n\n"
-            "📌 <b>دلایل احتمالی:</b>\n\n"
-            "   🔹 رسید ناخوانا یا ناقص\n"
-            "   🔹 مبلغ واریزی اشتباه\n"
-            "   🔹 رسید قدیمی یا تکراری\n\n"
+            f"📌 <b>دلیل:</b>\n{reason}\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📞 برای پیگیری: @{SUPPORT_USERNAME}"
+            f"❓ سوال؟ @{SUPPORT_USERNAME}"
         )
     except Exception: pass
-    bot.send_message(call.message.chat.id, f"❌ سفارش #{order_id} رد شد.")
+    bot.send_message(msg.chat.id, f"❌ سفارش #{order_id} رد شد.\n📤 دلیل برای کاربر ارسال شد.")
 
 def _delete_receipt_admin_msg(order_id):
     """پاک کردن پیام رسید ادمین بعد از تایید یا رد"""
@@ -1721,7 +1740,6 @@ def _build_svc_message(svc, plan, fetch_usage=True):
     kb = types.InlineKeyboardMarkup(row_width=1)
     if sub.startswith("http"):
         kb.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=sub))
-        kb.add(types.InlineKeyboardButton("🔄 بروزرسانی آمار مصرف", callback_data=f"vs_{svc['id']}"))
     kb.add(types.InlineKeyboardButton("✏️ تغییر نام", callback_data=f"rename_{svc['id']}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="menu_services"))
 
@@ -1750,6 +1768,28 @@ def _build_svc_message(svc, plan, fetch_usage=True):
         )
     return text, kb
 
+def _stop_svc_refresh(user_id):
+    if user_id in _svc_refresh:
+        _svc_refresh[user_id].set()
+        del _svc_refresh[user_id]
+
+def _start_svc_refresh(user_id, chat_id, message_id, svc_id, plan):
+    _stop_svc_refresh(user_id)
+    stop_ev = threading.Event()
+    _svc_refresh[user_id] = stop_ev
+    def loop():
+        while not stop_ev.wait(30):
+            try:
+                if stop_ev.is_set(): break
+                with get_db() as conn:
+                    svc = conn.execute("SELECT * FROM order_services WHERE id=?", (svc_id,)).fetchone()
+                if not svc or stop_ev.is_set(): break
+                text, kb = _build_svc_message(svc, plan, fetch_usage=True)
+                bot.edit_message_text(text, chat_id, message_id, reply_markup=kb)
+            except Exception:
+                break
+    threading.Thread(target=loop, daemon=True).start()
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("vs_"))
 def cb_view_svc(call):
     svc_id = int(call.data[3:])
@@ -1760,7 +1800,9 @@ def cb_view_svc(call):
     bot.answer_callback_query(call.id, "⏳ در حال دریافت اطلاعات...")
     safe_delete(call.message.chat.id, call.message.message_id)
     text, kb = _build_svc_message(svc, plan, fetch_usage=True)
-    bot.send_message(call.message.chat.id, text, reply_markup=kb)
+    sent = bot.send_message(call.message.chat.id, text, reply_markup=kb)
+    if (svc["sub_link"] or "").startswith("http"):
+        _start_svc_refresh(call.from_user.id, call.message.chat.id, sent.message_id, svc_id, plan)
 
 # ─────────────────────────────────────────────
 #  💰 WALLET
@@ -1819,7 +1861,7 @@ def _handle_wallet_receipt(msg):
     file_id = msg.photo[-1].file_id
     u = get_user(msg.from_user.id); uname = u["username"] or u["full_name"] or str(msg.from_user.id)
     with get_db() as conn:
-        cur = conn.execute("INSERT INTO wallet_requests(user_id,amount) VALUES(?,?)", (msg.from_user.id, amount))
+        cur = conn.execute("INSERT INTO wallet_requests(user_id,amount,file_id) VALUES(?,?,?)", (msg.from_user.id, amount, file_id))
         req_id = cur.lastrowid; conn.commit()
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -1851,22 +1893,51 @@ def cb_wallet_approve(call):
     if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     parts = call.data.split("_"); req_id = int(parts[2]); user_id = int(parts[3]); amount = int(parts[4])
     bot.answer_callback_query(call.id)
+    set_state(ADMIN_ID, step="wadm_ok_reason", req_id=req_id, target_uid=user_id, wallet_amount=amount)
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("⬛ بدون یادداشت", callback_data=f"wadm_ok_nonote_{req_id}_{user_id}_{amount}"))
+    bot.send_message(call.message.chat.id,
+        f"📝 <b>یادداشت شارژ {fmt(amount)} تومان</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "دلیل یا یادداشت شارژ را بنویسید تا برای کاربر ارسال شود:\n"
+        "<i>(یا دکمه «بدون یادداشت» را بزنید)</i>",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("wadm_ok_nonote_"))
+def cb_wallet_approve_nonote(call):
+    if call.from_user.id != ADMIN_ID: return
+    parts = call.data.split("_"); req_id = int(parts[3]); user_id = int(parts[4]); amount = int(parts[5])
+    bot.answer_callback_query(call.id)
+    clear_state(ADMIN_ID)
+    _do_wallet_approve(call.message.chat.id, req_id, user_id, amount, "")
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "wadm_ok_reason")
+def adm_wallet_approve_reason(msg):
+    note = (msg.text or "").strip()
+    state = get_state(ADMIN_ID)
+    req_id = state.get("req_id"); user_id = state.get("target_uid"); amount = state.get("wallet_amount")
+    clear_state(ADMIN_ID)
+    _do_wallet_approve(msg.chat.id, req_id, user_id, amount, note)
+
+def _do_wallet_approve(chat_id, req_id, user_id, amount, note):
     add_wallet(user_id, amount)
     with get_db() as conn:
         conn.execute("UPDATE wallet_requests SET status='approved' WHERE id=?", (req_id,)); conn.commit()
-    safe_delete(call.message.chat.id, call.message.message_id)
     new_bal = get_wallet(user_id)
+    note_line = f"\n📌 <b>یادداشت:</b> {note}\n" if note else ""
     try:
         bot.send_message(user_id,
             f"✅ <b>کیف پول شارژ شد!</b> 🎉\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💰 <b>مبلغ شارژ:</b> {fmt(amount)} تومان\n"
-            f"💎 <b>موجودی جدید:</b> {fmt(new_bal)} تومان\n\n"
+            f"💎 <b>موجودی جدید:</b> {fmt(new_bal)} تومان\n"
+            f"{note_line}\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "🛒 از فروشگاه خرید کنید!"
         )
     except Exception: pass
-    bot.send_message(call.message.chat.id, f"✅ {fmt(amount)} تومان به {user_id} اضافه شد.")
+    bot.send_message(chat_id, f"✅ {fmt(amount)} تومان به <code>{user_id}</code> اضافه شد.")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("wadm_rej_"))
 def cb_wallet_reject(call):
@@ -2867,13 +2938,13 @@ def _show_user_detail(chat_id, uid):
 def cb_ap_add(call):
     uid = int(call.data[7:]); bot.answer_callback_query(call.id)
     set_state(ADMIN_ID, step="adm_add_wallet", target_uid=uid)
-    bot.send_message(call.message.chat.id, f"💰 مبلغ شارژ برای <code>{uid}</code>:")
+    bot.send_message(call.message.chat.id, f"💰 مبلغ شارژ برای <code>{uid}</code> را وارد کنید:")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ap_sub_") and c.from_user.id == ADMIN_ID)
 def cb_ap_sub(call):
     uid = int(call.data[7:]); bot.answer_callback_query(call.id)
     set_state(ADMIN_ID, step="adm_sub_wallet", target_uid=uid)
-    bot.send_message(call.message.chat.id, f"➖ مبلغ کسر از <code>{uid}</code>:")
+    bot.send_message(call.message.chat.id, f"➖ مبلغ کسر از کیف پول <code>{uid}</code> را وارد کنید:")
 
 @bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") in ("adm_add_wallet","adm_sub_wallet"))
 def adm_modify_wallet(msg):
@@ -2888,10 +2959,42 @@ def adm_modify_wallet(msg):
         try: bot.send_message(uid, f"✅ {fmt(amount)} تومان به کیف پولتان اضافه شد!\n💎 موجودی: {fmt(get_wallet(uid))} تومان")
         except Exception: pass
         bot.send_message(msg.chat.id, f"✅ {fmt(amount)} تومان اضافه شد. موجودی: {fmt(get_wallet(uid))}")
+        clear_state(ADMIN_ID)
     else:
-        dec = min(amount, get_wallet(uid)); deduct_wallet(uid, dec)
-        bot.send_message(msg.chat.id, f"➖ {fmt(dec)} تومان کسر شد. موجودی: {fmt(get_wallet(uid))}")
+        # Ask for reason before deducting
+        set_state(ADMIN_ID, step="adm_sub_reason", sub_amount=amount)
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("⬛ بدون دلیل", callback_data=f"adm_sub_noreason_{uid}_{amount}"))
+        bot.send_message(msg.chat.id,
+            f"📝 <b>دلیل کسر {fmt(amount)} تومان از <code>{uid}</code></b>\n\n"
+            "دلیل کسر را بنویسید تا برای کاربر ارسال شود:\n"
+            "<i>(یا دکمه «بدون دلیل» را بزنید)</i>",
+            reply_markup=kb
+        )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_sub_noreason_") and c.from_user.id == ADMIN_ID)
+def cb_sub_noreason(call):
+    parts = call.data.split("_"); uid = int(parts[3]); amount = int(parts[4])
+    bot.answer_callback_query(call.id); clear_state(ADMIN_ID)
+    _do_wallet_deduct(call.message.chat.id, uid, amount, "")
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_sub_reason")
+def adm_sub_reason_handler(msg):
+    reason = (msg.text or "").strip()
+    state = get_state(ADMIN_ID); uid = state.get("target_uid"); amount = state.get("sub_amount")
     clear_state(ADMIN_ID)
+    _do_wallet_deduct(msg.chat.id, uid, amount, reason)
+
+def _do_wallet_deduct(chat_id, uid, amount, reason):
+    dec = min(amount, get_wallet(uid)); deduct_wallet(uid, dec)
+    reason_line = f"\n📌 <b>دلیل:</b> {reason}" if reason else ""
+    try:
+        bot.send_message(uid,
+            f"➖ <b>{fmt(dec)} تومان از کیف پولتان کسر شد.</b>\n"
+            f"💎 موجودی جدید: {fmt(get_wallet(uid))} تومان{reason_line}"
+        )
+    except Exception: pass
+    bot.send_message(chat_id, f"➖ {fmt(dec)} تومان کسر شد. موجودی: {fmt(get_wallet(uid))}")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ap_ban_") and c.from_user.id == ADMIN_ID)
 def cb_ap_ban(call):
@@ -2910,24 +3013,197 @@ def cb_ap_ban(call):
 def cb_ap_pending(call):
     bot.answer_callback_query(call.id)
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT r.*,u.username,u.full_name FROM receipts r JOIN users u ON r.user_id=u.user_id "
-            "WHERE r.status='pending' ORDER BY r.created_at DESC LIMIT 10"
+        purchase_rows = conn.execute(
+            "SELECT r.*,o.total_price,u.username,u.full_name FROM receipts r "
+            "JOIN orders o ON r.order_id=o.id "
+            "JOIN users u ON r.user_id=u.user_id "
+            "WHERE r.status='pending' ORDER BY r.created_at DESC LIMIT 20"
         ).fetchall()
-    if not rows: return bot.send_message(call.message.chat.id, "✅ هیچ رسید معلقی وجود ندارد.")
-    for r in rows:
+        wallet_rows = conn.execute(
+            "SELECT wr.*,u.username,u.full_name FROM wallet_requests wr "
+            "JOIN users u ON wr.user_id=u.user_id "
+            "WHERE wr.status='pending' ORDER BY wr.created_at DESC LIMIT 20"
+        ).fetchall()
+
+    all_items = []
+    for r in purchase_rows:
+        uname = r["username"] or r["full_name"] or str(r["user_id"])
+        all_items.append({"type":"p","id":r["id"],"uid":r["user_id"],"uname":uname,
+                          "amount":r["total_price"],"order_id":r["order_id"],"file_id":r["file_id"]})
+    for r in wallet_rows:
+        uname = r["username"] or r["full_name"] or str(r["user_id"])
+        all_items.append({"type":"w","id":r["id"],"uid":r["user_id"],"uname":uname,
+                          "amount":r["amount"],"order_id":None,"file_id":r["file_id"] if "file_id" in r.keys() else None})
+
+    if not all_items:
+        return bot.send_message(call.message.chat.id, "✅ هیچ رسید معلقی وجود ندارد.")
+
+    # Build summary text
+    text = "📋 <b>رسیدهای تایید نشده</b>\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, item in enumerate(all_items, 1):
+        t = "شارژ کیف پول" if item["type"] == "w" else "خرید"
+        text += (f"{i}. آیدی: <code>{item['uid']}</code>  |  "
+                 f"{fmt(item['amount'])} تومان  |  {t}  |  ⏳ تایید نشده\n")
+
+    # Inline number buttons
+    kb = types.InlineKeyboardMarkup(row_width=5)
+    btns = [types.InlineKeyboardButton(str(i+1), callback_data=f"pv__{all_items[i]['type']}_{all_items[i]['id']}")
+            for i in range(len(all_items))]
+    kb.add(*btns)
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="menu_admin"))
+    bot.send_message(call.message.chat.id, text, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pv__") and c.from_user.id == ADMIN_ID)
+def cb_pending_view_item(call):
+    bot.answer_callback_query(call.id)
+    parts = call.data[4:].split("_", 1)  # pv__p_123 → ['p', '123']
+    item_type = parts[0]; item_id = int(parts[1])
+    if item_type == "p":
+        with get_db() as conn:
+            r = conn.execute(
+                "SELECT r.*,o.total_price,u.username,u.full_name FROM receipts r "
+                "JOIN orders o ON r.order_id=o.id "
+                "JOIN users u ON r.user_id=u.user_id WHERE r.id=?", (item_id,)
+            ).fetchone()
+        if not r: return bot.send_message(call.message.chat.id, "❌ رسید یافت نشد.")
         uname = r["username"] or r["full_name"] or str(r["user_id"])
         kb = types.InlineKeyboardMarkup(row_width=2)
         kb.add(
             types.InlineKeyboardButton("✅ تایید", callback_data=f"adm_ok_{r['order_id']}"),
             types.InlineKeyboardButton("❌ رد",    callback_data=f"adm_rej_{r['order_id']}"),
         )
-        bot.send_message(call.message.chat.id,
-            f"📥 <b>رسید #{r['id']}</b>\n"
-            f"👤 @{uname} | <code>{r['user_id']}</code>\n"
-            f"📅 {r['created_at'][:16]}\n"
-            f"نوع: {r['receipt_type']}", reply_markup=kb
+        kb.add(types.InlineKeyboardButton("🔙 رسیدهای بررسی نشده", callback_data="ap_pending"))
+        caption = (f"📥 <b>رسید خرید</b>\n\n"
+                   f"👤 @{uname}  |  <code>{r['user_id']}</code>\n"
+                   f"💰 {fmt(r['total_price'])} تومان\n"
+                   f"📅 {r['created_at'][:16]}\n"
+                   f"نوع: {r['receipt_type']}")
+        if r["file_id"]:
+            bot.send_photo(call.message.chat.id, r["file_id"], caption=caption, reply_markup=kb)
+        else:
+            bot.send_message(call.message.chat.id, caption, reply_markup=kb)
+    else:
+        with get_db() as conn:
+            r = conn.execute(
+                "SELECT wr.*,u.username,u.full_name FROM wallet_requests wr "
+                "JOIN users u ON wr.user_id=u.user_id WHERE wr.id=?", (item_id,)
+            ).fetchone()
+        if not r: return bot.send_message(call.message.chat.id, "❌ رسید یافت نشد.")
+        uname = r["username"] or r["full_name"] or str(r["user_id"])
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("✅ تایید شارژ", callback_data=f"wadm_ok_{item_id}_{r['user_id']}_{r['amount']}"),
+            types.InlineKeyboardButton("❌ رد",         callback_data=f"wadm_rej_{item_id}_{r['user_id']}"),
         )
+        kb.add(types.InlineKeyboardButton("🔙 رسیدهای بررسی نشده", callback_data="ap_pending"))
+        caption = (f"💰 <b>درخواست شارژ کیف پول</b>\n\n"
+                   f"👤 @{uname}  |  <code>{r['user_id']}</code>\n"
+                   f"💰 {fmt(r['amount'])} تومان\n"
+                   f"📅 {r['created_at'][:16]}")
+        file_id = r["file_id"] if "file_id" in r.keys() else None
+        if file_id:
+            bot.send_photo(call.message.chat.id, file_id, caption=caption, reply_markup=kb)
+        else:
+            bot.send_message(call.message.chat.id, caption, reply_markup=kb)
+
+# ─────────────────────────────────────────────
+#  🤖 SMART SUPPORT
+# ─────────────────────────────────────────────
+def _support_ai_system():
+    ios  = f"لینک دانلود iOS: {APP_LINK_IOS}" if APP_LINK_IOS else "لینک iOS: هنوز تنظیم نشده"
+    andr = f"لینک دانلود اندروید: {APP_LINK_ANDROID}" if APP_LINK_ANDROID else "لینک اندروید: هنوز تنظیم نشده"
+    return (
+        "تو پشتیبانی هوشمند ربات ViraNet VPN هستی. "
+        "با احترام و مختصر به سوالات کاربران پاسخ می‌دهی. "
+        "اطلاعات مفید:\n"
+        f"  {ios}\n"
+        f"  {andr}\n"
+        "اگر کاربر پرسید از کجا برنامه دانلود کند، لینک‌های بالا را بده.\n"
+        "اگر مشکل اتصال داشت: بگو برنامه را ری‌استارت کند، کانفیگ را دوباره وارد کند.\n"
+        "اگر گفت رسیدش تایید نشده: بگو صبر کنند، مشکل تکنیکی باشد با ادمین در میان بگذارند.\n"
+        "اگر سوال درباره قیمت پرسید: بگو از فروشگاه ربات پلن‌ها را ببینند.\n"
+        "اگر نمی‌دانی: بگو «لطفاً مستقیم با پشتیبانی تماس بگیرید.»\n"
+        "پاسخ‌ها را کوتاه، مفید و فارسی بنویس. از ایموجی استفاده کن."
+    )
+
+_support_chats: dict = {}  # user_id → [{"role":..,"content":..}]
+
+RECEIPT_KEYWORDS = ["تایید نشد", "رد شد", "رسیدم", "فیشم", "پرداخت تایید نشده", "شارژ نشد", "پول کم نشد"]
+
+@bot.callback_query_handler(func=lambda c: c.data == "menu_smart_support")
+def cb_smart_support(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    _support_chats[uid] = []
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("💬 شروع گفتگو", callback_data="support_start_chat"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
+    bot.send_message(call.message.chat.id,
+        "🤖 <b>پشتیبانی هوشمند ViraNet</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "با هوش مصنوعی سوال بپرسید:\n"
+        "   🔹 مشکل اتصال\n"
+        "   🔹 دانلود برنامه\n"
+        "   🔹 سوال درباره سرویس\n"
+        "   🔹 خرید و پرداخت\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "برای پایان گفتگو <code>/end</code> بنویسید.",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "support_start_chat")
+def cb_support_start_chat(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    _support_chats[uid] = []
+    set_state(uid, step="smart_support")
+    bot.send_message(call.message.chat.id,
+        "💬 <b>گفتگو شروع شد!</b>\n\n"
+        "سوال خود را بنویسید.\n"
+        "برای پایان <code>/end</code> بنویسید.",
+    )
+
+@bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "smart_support")
+def smart_support_chat(msg):
+    uid = msg.from_user.id
+    text = (msg.text or "").strip()
+    if text == "/end":
+        clear_state(uid)
+        _support_chats.pop(uid, None)
+        return send_main_menu(msg.chat.id, uid, "✅ گفتگو پایان یافت. به منوی اصلی بازگشتید.")
+    # Detect receipt complaint → notify admin
+    if any(kw in text for kw in RECEIPT_KEYWORDS):
+        u = get_user(uid)
+        uname = u["username"] or u["full_name"] if u else str(uid)
+        try:
+            bot.send_message(ADMIN_ID,
+                f"⚠️ <b>کاربر از تایید نشدن رسید شکایت دارد</b>\n\n"
+                f"👤 @{uname}  |  <code>{uid}</code>\n"
+                f"💬 پیام: {html_lib.escape(text[:200])}"
+            )
+        except Exception: pass
+    # Build history
+    history = _support_chats.get(uid, [])
+    history.append({"role": "user", "content": text})
+    if len(history) > 12: history = history[-12:]
+    _support_chats[uid] = history
+    bot.send_chat_action(msg.chat.id, "typing")
+    full_msgs = [{"role": "system", "content": _support_ai_system()}] + history
+    reply = ai_chat(full_msgs)
+    history.append({"role": "assistant", "content": reply})
+    _support_chats[uid] = history
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔚 پایان گفتگو", callback_data="support_end"))
+    bot.send_message(msg.chat.id, f"🤖 {reply}", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data == "support_end")
+def cb_support_end(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    clear_state(uid)
+    _support_chats.pop(uid, None)
+    safe_delete(call.message.chat.id, call.message.message_id)
+    send_main_menu(call.message.chat.id, uid, "✅ گفتگو پایان یافت.")
 
 # ─────────────────────────────────────────────
 #  FALLBACK
