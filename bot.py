@@ -56,6 +56,15 @@ FREE_TRIAL_GB       = 1
 FREE_TRIAL_CONFIG   = ""
 FREE_TRIAL_SUB_LINK = ""  # ساب‌لینک تست رایگان برای چک حجم
 
+# ── Surfshark ──────────────────────────────────
+SURFSHARK_1YEAR_PRICE   = 2_500_000  # قیمت پیش‌فرض یه ساله نامحدود
+SURFSHARK_ENABLED       = True       # نمایش surfshark در فروشگاه
+V2RAY_ENABLED           = True       # نمایش v2ray در فروشگاه
+
+# ── روش‌های پرداخت ────────────────────────────
+PAYMENT_CARD_ENABLED    = True       # فعال/غیرفعال کارت به کارت
+PAYMENT_CRYPTO_ENABLED  = True       # فعال/غیرفعال ترون
+
 APP_LINK_IOS     = ""
 APP_LINK_ANDROID = ""
 
@@ -134,6 +143,18 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             used_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS surfshark_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            order_type TEXT NOT NULL DEFAULT '1year',
+            total_price INTEGER NOT NULL,
+            payment_method TEXT,
+            status TEXT DEFAULT 'pending',
+            receipt_file_id TEXT,
+            qr_file_id TEXT,
+            admin_msg_id INTEGER,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
         """)
         try:
             conn.execute("ALTER TABLE order_services ADD COLUMN sub_link TEXT")
@@ -188,6 +209,11 @@ def init_db():
             ("notify_new_user",   "1"),
             ("notify_new_order",  "1"),
             ("welcome_text",      ""),
+            ("surfshark_1year_price", str(SURFSHARK_1YEAR_PRICE)),
+            ("surfshark_enabled", "1"),
+            ("v2ray_enabled",     "1"),
+            ("payment_card_enabled",   "1"),
+            ("payment_crypto_enabled", "1"),
         ]
         for k, v in defaults:
             if not conn.execute("SELECT 1 FROM settings WHERE key=?", (k,)).fetchone():
@@ -224,6 +250,8 @@ def _reload_settings(conn=None):
     global FREE_TRIAL_ENABLED, FREE_TRIAL_DAYS, FREE_TRIAL_GB, FREE_TRIAL_CONFIG, FREE_TRIAL_SUB_LINK
     global APP_LINK_IOS, APP_LINK_ANDROID, GROUP_ID, PANEL_URL, PANEL_TOKEN
     global NOTIFY_NEW_USER, NOTIFY_NEW_ORDER, WELCOME_TEXT
+    global SURFSHARK_1YEAR_PRICE, SURFSHARK_ENABLED, V2RAY_ENABLED
+    global PAYMENT_CARD_ENABLED, PAYMENT_CRYPTO_ENABLED
     def _q(c):
         return {r["key"]: r["value"] for r in c.execute("SELECT key,value FROM settings").fetchall()}
     if conn:
@@ -249,6 +277,11 @@ def _reload_settings(conn=None):
     NOTIFY_NEW_USER    = d.get("notify_new_user",   "1") == "1"
     NOTIFY_NEW_ORDER   = d.get("notify_new_order",  "1") == "1"
     WELCOME_TEXT       = d.get("welcome_text",      "")
+    SURFSHARK_1YEAR_PRICE  = int(d.get("surfshark_1year_price", str(SURFSHARK_1YEAR_PRICE)))
+    SURFSHARK_ENABLED      = d.get("surfshark_enabled", "1") == "1"
+    V2RAY_ENABLED          = d.get("v2ray_enabled",     "1") == "1"
+    PAYMENT_CARD_ENABLED   = d.get("payment_card_enabled",   "1") == "1"
+    PAYMENT_CRYPTO_ENABLED = d.get("payment_crypto_enabled", "1") == "1"
 
 # ─────────────────────────────────────────────
 #  HELPERS
@@ -1242,7 +1275,43 @@ def _fmt_price_short(price):
 
 def _show_shop(chat_id, user_id):
     reload_plans()
-    if not PLANS: return bot.send_message(chat_id, "❌ هیچ محصولی موجود نیست.")
+    # بررسی کدام محصولات فعال هستند
+    has_v2ray    = V2RAY_ENABLED and bool(PLANS)
+    has_surf     = SURFSHARK_ENABLED
+
+    if not has_v2ray and not has_surf:
+        return bot.send_message(chat_id, "❌ هیچ محصولی موجود نیست.")
+
+    set_state(user_id, step="shop_type")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if has_v2ray:
+        kb.add(types.InlineKeyboardButton("🔵 V2Ray (کانفیگ VPN)", callback_data="shop_type_v2ray"))
+    if has_surf:
+        kb.add(types.InlineKeyboardButton("🦈 Surfshark یه ساله", callback_data="shop_type_surfshark"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
+    bot.send_message(chat_id,
+        "🛒 <b>فروشگاه ویرا نت</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "✅ فعال‌سازی فوری\n"
+        "✅ سرعت نامحدود\n"
+        "✅ پشتیبانی ۲۴ ساعته\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 نوع سرویس مورد نظر را انتخاب کنید:",
+        reply_markup=kb
+    )
+
+# ── انتخاب نوع محصول از فروشگاه ─────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "shop_type_v2ray")
+def cb_shop_type_v2ray(call):
+    if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
+    bot.answer_callback_query(call.id)
+    ensure_user(call.from_user); clear_state(call.from_user.id)
+    safe_delete(call.message.chat.id, call.message.message_id)
+    _show_v2ray_plans(call.message.chat.id, call.from_user.id)
+
+def _show_v2ray_plans(chat_id, user_id):
+    reload_plans()
+    if not PLANS: return bot.send_message(chat_id, "❌ هیچ پلن V2Ray موجود نیست.")
     set_state(user_id, step="shop_plan")
     kb = types.InlineKeyboardMarkup(row_width=3)
     for key, plan in PLANS.items():
@@ -1255,9 +1324,9 @@ def _show_shop(chat_id, user_id):
         )
     if WEBAPP_URL:
         kb.add(types.InlineKeyboardButton("🌐 خرید از پنل کاربری", web_app=types.WebAppInfo(url=WEBAPP_URL + "/panel")))
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="menu_shop"))
     bot.send_message(chat_id,
-        "🛒 <b>فروشگاه ویرا نت</b>\n\n"
+        "🔵 <b>V2Ray — پلن‌های اینترنت</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "✅ فعال‌سازی فوری\n"
         "✅ سرعت نامحدود\n"
@@ -1266,6 +1335,199 @@ def _show_shop(chat_id, user_id):
         "👇 پلن مورد نظر را انتخاب کنید:",
         reply_markup=kb
     )
+
+@bot.callback_query_handler(func=lambda c: c.data == "shop_type_surfshark")
+def cb_shop_type_surfshark(call):
+    if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
+    bot.answer_callback_query(call.id)
+    ensure_user(call.from_user)
+    safe_delete(call.message.chat.id, call.message.message_id)
+    _show_surfshark_plans(call.message.chat.id, call.from_user.id)
+
+def _show_surfshark_plans(chat_id, user_id):
+    set_state(user_id, step="surfshark_plan")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(
+        f"🦈 یه ساله نامحدود — {fmt(SURFSHARK_1YEAR_PRICE)} تومان",
+        callback_data="surf_plan_1year"
+    ))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="menu_shop"))
+    bot.send_message(chat_id,
+        "🦈 <b>Surfshark VPN</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "✅ دسترسی نامحدود\n"
+        "✅ تمام کشورها\n"
+        "✅ چند دستگاه همزمان\n"
+        "✅ بدون محدودیت ترافیک\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 پلن مورد نظر را انتخاب کنید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "surf_plan_1year")
+def cb_surf_plan_1year(call):
+    if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    safe_delete(call.message.chat.id, call.message.message_id)
+    total = SURFSHARK_1YEAR_PRICE
+    set_state(uid, step="surfshark_payment", surf_order_type="1year", surf_total=total)
+    _ask_surfshark_payment(call.message.chat.id, uid)
+
+def _ask_surfshark_payment(chat_id, user_id):
+    total  = get_state(user_id).get("surf_total", SURFSHARK_1YEAR_PRICE)
+    wallet = get_wallet(user_id)
+    set_state(user_id, step="surfshark_payment")
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(f"💰 کیف پول  (موجودی: {fmt(wallet)} ت)", callback_data="surf_pay_wallet"))
+    if PAYMENT_CARD_ENABLED:
+        kb.add(types.InlineKeyboardButton("💳 کارت به کارت", callback_data="surf_pay_card"))
+    if PAYMENT_CRYPTO_ENABLED:
+        kb.add(types.InlineKeyboardButton("🔷 ترون (TRX)", callback_data="surf_pay_crypto"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="shop_type_surfshark"))
+    bot.send_message(chat_id,
+        f"🦈 <b>خرید Surfshark یه ساله</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💰 <b>مبلغ:</b> {fmt(total)} تومان\n"
+        "📅 <b>مدت:</b> ۱ ساله\n"
+        "♾️ <b>ترافیک:</b> نامحدود\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 روش پرداخت را انتخاب کنید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data in ("surf_pay_wallet", "surf_pay_card", "surf_pay_crypto"))
+def cb_surf_payment(call):
+    if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
+    state = get_state(call.from_user.id)
+    if state.get("step") != "surfshark_payment": return bot.answer_callback_query(call.id)
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    total  = state.get("surf_total", SURFSHARK_1YEAR_PRICE)
+    wallet = get_wallet(uid)
+
+    if call.data == "surf_pay_wallet":
+        if wallet < total:
+            return bot.send_message(call.message.chat.id,
+                f"❌ <b>موجودی کیف پول کافی نیست!</b>\n\n"
+                f"💰 موجودی: <b>{fmt(wallet)} ت</b>\n"
+                f"💳 نیاز: <b>{fmt(total)} ت</b>"
+            )
+        deduct_wallet(uid, total)
+        _create_surfshark_order(uid, call.message.chat.id, total, "wallet")
+    elif call.data == "surf_pay_card":
+        _surfshark_card_payment(uid, call.message.chat.id, total)
+    else:
+        _surfshark_crypto_payment(uid, call.message.chat.id, total)
+
+def _create_surfshark_order(user_id, chat_id, total, payment_method, receipt_file_id=None):
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO surfshark_orders(user_id,order_type,total_price,payment_method,status,receipt_file_id) VALUES(?,?,?,?,?,?)",
+            (user_id, "1year", total, payment_method, "pending", receipt_file_id)
+        )
+        order_id = cur.lastrowid
+        conn.commit()
+    u = get_user(user_id); uname = u["username"] or u["full_name"] or str(user_id)
+    adm_kb = types.InlineKeyboardMarkup(row_width=2)
+    adm_kb.add(
+        types.InlineKeyboardButton("✅ تایید", callback_data=f"surf_ok_{order_id}"),
+        types.InlineKeyboardButton("❌ رد",    callback_data=f"surf_rej_{order_id}"),
+    )
+    caption = (
+        f"🦈 <b>سفارش Surfshark جدید</b>\n\n"
+        f"👤 @{uname}  |  <code>{user_id}</code>\n"
+        f"🕐 {now_str()}\n\n"
+        f"📅 یه ساله نامحدود\n"
+        f"💰 {fmt(total)} تومان\n"
+        f"💳 پرداخت: {payment_method}"
+    )
+    if receipt_file_id:
+        adm_msg = bot.send_photo(ADMIN_ID, receipt_file_id, caption=caption, reply_markup=adm_kb)
+    else:
+        adm_msg = bot.send_message(ADMIN_ID, caption, reply_markup=adm_kb)
+    with get_db() as conn:
+        conn.execute("UPDATE surfshark_orders SET admin_msg_id=? WHERE id=?", (adm_msg.message_id, order_id))
+        conn.commit()
+    clear_state(user_id)
+    bot.send_message(chat_id,
+        "📥 <b>سفارش ثبت شد!</b> ✅\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ <b>در حال بررسی...</b>\n\n"
+        "📌 پس از تایید، راهنمای فعال‌سازی ارسال می‌شود.\n\n"
+        f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
+        f"❓ سوال؟ @{SUPPORT_USERNAME}"
+    )
+
+def _surfshark_card_payment(user_id, chat_id, total):
+    set_state(user_id, step="surfshark_receipt_wait", surf_total=total)
+    bot.send_message(chat_id,
+        f"💳 <b>پرداخت کارت به کارت — Surfshark</b>\n\n"
+        f"💰 <b>مبلغ:</b>  {fmt(total)} تومان\n\n"
+        "🏦 <b>مشخصات حساب:</b>\n\n"
+        f"  💳 شماره کارت:\n  <code>{CARD_NUMBER}</code>\n\n"
+        f"  👤 به نام: <b>{CARD_OWNER}</b>\n\n"
+        f"  1️⃣  {fmt(total)} تومان واریز کنید\n"
+        "  2️⃣  رسید را همین‌جا ارسال کنید\n\n"
+        "👇 <b>تصویر رسید را ارسال کنید:</b>"
+    )
+
+def _surfshark_crypto_payment(user_id, chat_id, total):
+    bot.send_message(chat_id, "⏳ <b>در حال دریافت قیمت لحظه‌ای...</b>")
+    trx_amt = toman_to_trx(total)
+    sent = bot.send_message(chat_id, crypto_payment_text(total, trx_amt), reply_markup=_surf_crypto_kb())
+    set_state(user_id, step="surfshark_crypto_wait",
+              surf_crypto_msg_id=sent.message_id, surf_crypto_chat_id=chat_id, surf_total=total)
+    _start_surf_crypto_updater(user_id, chat_id, sent.message_id, total)
+
+def _surf_crypto_kb():
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("✅ واریز شد", callback_data="surf_crypto_paid"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت به روش پرداخت", callback_data="surf_back_payment"))
+    return kb
+
+def _start_surf_crypto_updater(user_id, chat_id, message_id, total):
+    stop_ev = threading.Event(); crypto_stop_events[f"surf_{user_id}"] = stop_ev
+    def updater():
+        while not stop_ev.wait(5):
+            if get_state(user_id).get("step") != "surfshark_crypto_wait": break
+            trx_amt = toman_to_trx(total)
+            try:
+                bot.edit_message_text(crypto_payment_text(total, trx_amt), chat_id, message_id,
+                                      reply_markup=_surf_crypto_kb(), parse_mode="HTML")
+            except Exception as e:
+                if "message is not modified" not in str(e): print(f"[surf_crypto] {e}")
+    threading.Thread(target=updater, daemon=True).start()
+
+@bot.callback_query_handler(func=lambda c: c.data == "surf_crypto_paid")
+def cb_surf_crypto_paid(call):
+    state = get_state(call.from_user.id)
+    if state.get("step") != "surfshark_crypto_wait": return bot.answer_callback_query(call.id)
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    key = f"surf_{uid}"
+    if key in crypto_stop_events: crypto_stop_events[key].set(); del crypto_stop_events[key]
+    total = state.get("surf_total", SURFSHARK_1YEAR_PRICE)
+    trx_amt = toman_to_trx(total)
+    trx_str = f"{trx_amt} TRX" if trx_amt else "---"
+    set_state(uid, step="surfshark_crypto_receipt", surf_total=total)
+    bot.send_message(call.message.chat.id,
+        "📸 <b>ارسال رسید پرداخت کریپتو — Surfshark</b>\n\n"
+        f"💰 <b>مبلغ:</b>  {fmt(total)} تومان\n"
+        f"🔷 <b>معادل TRX:</b>  {trx_str}\n\n"
+        "👇 <b>عکس رسید را ارسال کنید:</b>"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "surf_back_payment")
+def cb_surf_back_payment(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    key = f"surf_{uid}"
+    if key in crypto_stop_events: crypto_stop_events[key].set(); del crypto_stop_events[key]
+    state = get_state(uid)
+    total = state.get("surf_total", SURFSHARK_1YEAR_PRICE)
+    set_state(uid, step="surfshark_payment", surf_total=total)
+    _ask_surfshark_payment(call.message.chat.id, uid)
 
 @bot.message_handler(content_types=["web_app_data"])
 def handle_web_app_data(msg):
@@ -1373,11 +1635,11 @@ def _ask_payment(chat_id, user_id):
     names_text = "\n".join([f"  {i+1}. 🏷️ {n}" for i, n in enumerate(state["names"])])
     set_state(user_id, step="shop_payment")
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton(f"💰 کیف پول  (موجودی: {fmt(wallet)} ت)", callback_data="pay_wallet"),
-        types.InlineKeyboardButton("💳 کارت به کارت",       callback_data="pay_card"),
-        types.InlineKeyboardButton("🔷 ترون (TRX)",          callback_data="pay_crypto"),
-    )
+    kb.add(types.InlineKeyboardButton(f"💰 کیف پول  (موجودی: {fmt(wallet)} ت)", callback_data="pay_wallet"))
+    if PAYMENT_CARD_ENABLED:
+        kb.add(types.InlineKeyboardButton("💳 کارت به کارت", callback_data="pay_card"))
+    if PAYMENT_CRYPTO_ENABLED:
+        kb.add(types.InlineKeyboardButton("🔷 ترون (TRX)", callback_data="pay_crypto"))
     bot.send_message(chat_id,
         f"💳 <b>مرحله پرداخت</b>\n\n"
         f"📦 <b>پلن:</b> {plan['label']}\n"
@@ -1533,9 +1795,12 @@ def _create_order_and_notify(user_id, chat_id, state, payment_method):
 def handle_all_photos(msg):
     if is_offline_for(msg.from_user.id): return bot.send_message(msg.chat.id, OFFLINE_MSG)
     step = get_state(msg.from_user.id).get("step")
-    if step == "shop_receipt_wait":   _handle_shop_receipt(msg)
-    elif step == "shop_crypto_receipt": _handle_crypto_receipt(msg)
-    elif step == "wallet_receipt":      _handle_wallet_receipt(msg)
+    if step == "shop_receipt_wait":              _handle_shop_receipt(msg)
+    elif step == "shop_crypto_receipt":          _handle_crypto_receipt(msg)
+    elif step == "wallet_receipt":               _handle_wallet_receipt(msg)
+    elif step == "surfshark_receipt_wait":       _handle_surfshark_receipt(msg)
+    elif step == "surfshark_crypto_receipt":     _handle_surfshark_crypto_receipt(msg)
+    elif step == "surfshark_qr_wait":            _handle_surfshark_qr(msg)
 
 def _handle_shop_receipt(msg):
     state = get_state(msg.from_user.id); order_id = state.get("order_id")
@@ -1616,6 +1881,172 @@ def _handle_crypto_receipt(msg):
         f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
         f"❓ سوال؟ @{SUPPORT_USERNAME}"
     )
+
+# ── Surfshark Receipt Handlers ─────────────────────
+def _handle_surfshark_receipt(msg):
+    state = get_state(msg.from_user.id)
+    total = state.get("surf_total", SURFSHARK_1YEAR_PRICE)
+    file_id = msg.photo[-1].file_id
+    _create_surfshark_order(msg.from_user.id, msg.chat.id, total, "card", file_id)
+
+def _handle_surfshark_crypto_receipt(msg):
+    state = get_state(msg.from_user.id)
+    total = state.get("surf_total", SURFSHARK_1YEAR_PRICE)
+    file_id = msg.photo[-1].file_id
+    _create_surfshark_order(msg.from_user.id, msg.chat.id, total, "crypto", file_id)
+
+def _handle_surfshark_qr(msg):
+    """کاربر اسکرین شات QR کد surfshark رو فرستاده"""
+    state = get_state(msg.from_user.id)
+    order_id = state.get("surf_order_id")
+    if not order_id: return bot.send_message(msg.chat.id, "⚠️ خطا: سفارش یافت نشد.")
+    file_id = msg.photo[-1].file_id
+    u = get_user(msg.from_user.id); uname = u["username"] or u["full_name"] or str(msg.from_user.id)
+
+    # ذخیره QR در دیتابیس
+    with get_db() as conn:
+        conn.execute("UPDATE surfshark_orders SET qr_file_id=?, status='qr_received' WHERE id=?", (file_id, order_id))
+        conn.commit()
+
+    # ارسال QR به ادمین با دکمه‌های تایید/رد
+    adm_kb = types.InlineKeyboardMarkup(row_width=2)
+    adm_kb.add(
+        types.InlineKeyboardButton("✅ تایید — اکانت فعال شد", callback_data=f"surf_qr_ok_{order_id}"),
+        types.InlineKeyboardButton("❌ رد",                     callback_data=f"surf_qr_rej_{order_id}"),
+    )
+    bot.send_photo(ADMIN_ID, file_id,
+        caption=(
+            f"📸 <b>QR کد Surfshark</b>\n\n"
+            f"👤 @{uname}  |  <code>{msg.from_user.id}</code>\n"
+            f"🕐 {now_str()}\n\n"
+            f"📋 سفارش #{order_id}\n\n"
+            "⬇️ QR کد رو اسکن کن و بعد تایید بزن"
+        ),
+        reply_markup=adm_kb
+    )
+    clear_state(msg.from_user.id)
+    bot.send_message(msg.chat.id,
+        "📸 <b>QR کد دریافت شد!</b> ✅\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ منتظر تایید ادمین باشید.\n\n"
+        "📌 پس از اسکن QR توسط ادمین، حساب شما فعال می‌شود.\n\n"
+        f"❓ پیگیری: @{SUPPORT_USERNAME}"
+    )
+
+# ── Admin Surfshark Approve / Reject ───────────────
+@bot.callback_query_handler(func=lambda c: c.data.startswith("surf_ok_"))
+def cb_surf_approve(call):
+    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    order_id = int(call.data[8:])
+    bot.answer_callback_query(call.id)
+    # تایید رسید، حالا باید QR کاربر رو بگیریم
+    with get_db() as conn:
+        order = conn.execute("SELECT * FROM surfshark_orders WHERE id=?", (order_id,)).fetchone()
+        conn.execute("UPDATE surfshark_orders SET status='receipt_approved' WHERE id=?", (order_id,))
+        conn.commit()
+    if not order: return
+    safe_delete(ADMIN_ID, order["admin_msg_id"])
+    # پیام به کاربر برای ارسال QR
+    set_state(order["user_id"], step="surfshark_qr_wait", surf_order_id=order_id)
+    try:
+        bot.send_message(order["user_id"],
+            "✅ <b>رسید تایید شد!</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📸 <b>حالا عکس QR کد Surfshark رو ارسال کنید:</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📋 <b>راهنما:</b>\n\n"
+            "  1️⃣  وارد برنامه‌ی Surfshark بشید\n"
+            "  2️⃣  روی <b>Login</b> بزنید\n"
+            "  3️⃣  روی <b>Log in with another device</b> کلیک کنید\n"
+            "  4️⃣  از QR کد یک <b>اسکرین‌شات</b> بگیرید\n"
+            "  5️⃣  اسکرین‌شات را اینجا ارسال کنید\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"❓ سوال؟ @{SUPPORT_USERNAME}"
+        )
+    except Exception as e:
+        print(f"[surf_approve] {e}")
+    bot.send_message(ADMIN_ID, f"✅ رسید سفارش #{order_id} تایید شد. منتظر QR کاربر باش.")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("surf_rej_"))
+def cb_surf_reject(call):
+    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    order_id = int(call.data[9:])
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        order = conn.execute("SELECT * FROM surfshark_orders WHERE id=?", (order_id,)).fetchone()
+        conn.execute("UPDATE surfshark_orders SET status='rejected' WHERE id=?", (order_id,))
+        conn.commit()
+    if not order: return
+    safe_delete(ADMIN_ID, order["admin_msg_id"])
+    try:
+        bot.send_message(order["user_id"],
+            "❌ <b>رسید شما رد شد.</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📞 پیگیری: @{SUPPORT_USERNAME}"
+        )
+    except Exception: pass
+    bot.send_message(ADMIN_ID, f"❌ سفارش Surfshark #{order_id} رد شد.")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("surf_qr_ok_"))
+def cb_surf_qr_ok(call):
+    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    order_id = int(call.data[11:])
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        order = conn.execute("SELECT * FROM surfshark_orders WHERE id=?", (order_id,)).fetchone()
+        conn.execute("UPDATE surfshark_orders SET status='delivered' WHERE id=?", (order_id,))
+        conn.commit()
+    if not order: return
+    # ارسال QR کد به ادمین (همون که کاربر فرستاد) دیگه لازم نیست، ادمین داره میبینه
+    safe_delete(ADMIN_ID, call.message.message_id)
+    # ارسال QR کد اسکن شده به ادمین
+    if order["qr_file_id"]:
+        bot.send_photo(ADMIN_ID, order["qr_file_id"],
+            caption="✅ QR رو اسکن کن تا کاربر وارد اکانتش بشه:"
+        )
+    try:
+        bot.send_message(order["user_id"],
+            "🎉 <b>اکانت Surfshark شما فعال شد!</b> 🦈\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "✅ <b>تایید شد — شما وارد اکانت Surfshark شدید!</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📱 <b>راهنمای استفاده:</b>\n\n"
+            "  ✅ وارد برنامه Surfshark بشید\n"
+            "  ✅ به سرور دلخواه وصل بشید\n"
+            "  ✅ از اینترنت نامحدود لذت ببرید!\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🆘 پشتیبانی: @{SUPPORT_USERNAME}\n"
+            "💙 از اعتماد شما سپاسگزاریم! 🌟"
+        )
+    except Exception as e:
+        print(f"[surf_qr_ok] {e}")
+    bot.send_message(ADMIN_ID, f"✅ سفارش Surfshark #{order_id} تحویل داده شد!")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("surf_qr_rej_"))
+def cb_surf_qr_rej(call):
+    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    order_id = int(call.data[12:])
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        order = conn.execute("SELECT * FROM surfshark_orders WHERE id=?", (order_id,)).fetchone()
+        conn.execute("UPDATE surfshark_orders SET status='qr_rejected' WHERE id=?", (order_id,))
+        conn.commit()
+    safe_delete(ADMIN_ID, call.message.message_id)
+    if order:
+        set_state(order["user_id"], step="surfshark_qr_wait", surf_order_id=order_id)
+        try:
+            bot.send_message(order["user_id"],
+                "❌ <b>QR کد رد شد.</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📸 لطفاً QR کد صحیح را دوباره ارسال کنید:\n\n"
+                "  1️⃣  وارد برنامه‌ی Surfshark بشید\n"
+                "  2️⃣  روی <b>Login</b> بزنید\n"
+                "  3️⃣  روی <b>Log in with another device</b> کلیک کنید\n"
+                "  4️⃣  از QR کد اسکرین‌شات بگیرید و ارسال کنید\n\n"
+                f"❓ سوال؟ @{SUPPORT_USERNAME}"
+            )
+        except Exception: pass
+    bot.send_message(ADMIN_ID, f"❌ QR سفارش #{order_id} رد شد. منتظر QR جدید.")
 
 # ─────────────────────────────────────────────
 #  ADMIN: APPROVE / REJECT
@@ -2315,6 +2746,8 @@ def cb_ap_settings(call):
     kb.add(types.InlineKeyboardButton("🎮 مدیریت پنل VPN",               callback_data="ap_vpn_panel"))
     kb.add(types.InlineKeyboardButton("📲 دریافت اپلیکیشن‌ها",           callback_data="ap_app_links"))
     kb.add(types.InlineKeyboardButton("🔔 مدیریت اعلان‌ها",              callback_data="ap_notifications"))
+    kb.add(types.InlineKeyboardButton("🦈 تنظیمات Surfshark",            callback_data="ap_surfshark_settings"))
+    kb.add(types.InlineKeyboardButton("💳 روش‌های پرداخت",               callback_data="ap_payment_methods"))
     kb.add(types.InlineKeyboardButton("🗑️ پاکسازی داده‌ها",             callback_data="ap_cleanup"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به پنل ادمین",          callback_data="menu_admin"))
     bot.send_message(call.message.chat.id,
@@ -2770,6 +3203,96 @@ def cb_ap_toggle_notif(call):
         save_setting("notify_new_order", new_val)
         lbl = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
         bot.send_message(call.message.chat.id, f"🔔 اعلان سفارش جدید: <b>{lbl}</b>")
+
+# ── تنظیمات Surfshark ────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_surfshark_settings" and c.from_user.id == ADMIN_ID)
+def cb_ap_surfshark_settings(call):
+    bot.answer_callback_query(call.id)
+    surf_icon = "✅" if SURFSHARK_ENABLED else "❌"
+    v2ray_icon = "✅" if V2RAY_ENABLED else "❌"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(f"{surf_icon} Surfshark در فروشگاه", callback_data="ap_toggle_surfshark"))
+    kb.add(types.InlineKeyboardButton(f"{v2ray_icon} V2Ray در فروشگاه",    callback_data="ap_toggle_v2ray"))
+    kb.add(types.InlineKeyboardButton("💰 تغییر قیمت یه ساله Surfshark",   callback_data="ap_surf_price"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",                         callback_data="ap_settings"))
+    bot.send_message(call.message.chat.id,
+        "🦈 <b>تنظیمات Surfshark</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{surf_icon} Surfshark در فروشگاه: <b>{'فعال' if SURFSHARK_ENABLED else 'غیرفعال'}</b>\n"
+        f"{v2ray_icon} V2Ray در فروشگاه: <b>{'فعال' if V2RAY_ENABLED else 'غیرفعال'}</b>\n\n"
+        f"💰 قیمت Surfshark یه ساله: <b>{fmt(SURFSHARK_1YEAR_PRICE)} تومان</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_toggle_surfshark" and c.from_user.id == ADMIN_ID)
+def cb_ap_toggle_surfshark(call):
+    bot.answer_callback_query(call.id)
+    new_val = "0" if SURFSHARK_ENABLED else "1"
+    save_setting("surfshark_enabled", new_val)
+    lbl = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
+    bot.send_message(call.message.chat.id, f"🦈 Surfshark در فروشگاه: <b>{lbl}</b>")
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_toggle_v2ray" and c.from_user.id == ADMIN_ID)
+def cb_ap_toggle_v2ray(call):
+    bot.answer_callback_query(call.id)
+    new_val = "0" if V2RAY_ENABLED else "1"
+    save_setting("v2ray_enabled", new_val)
+    lbl = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
+    bot.send_message(call.message.chat.id, f"🔵 V2Ray در فروشگاه: <b>{lbl}</b>")
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_surf_price" and c.from_user.id == ADMIN_ID)
+def cb_ap_surf_price(call):
+    bot.answer_callback_query(call.id)
+    set_state(ADMIN_ID, step="adm_surf_price")
+    bot.send_message(call.message.chat.id,
+        f"💰 قیمت فعلی Surfshark یه ساله: <b>{fmt(SURFSHARK_1YEAR_PRICE)} تومان</b>\n\n"
+        "👇 قیمت جدید را وارد کنید (تومان):"
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_surf_price")
+def adm_surf_price(msg):
+    try:
+        new_price = int((msg.text or "").strip().replace(",","").replace("٬",""))
+        if new_price <= 0: raise ValueError
+    except ValueError:
+        return bot.send_message(msg.chat.id, "⚠️ قیمت معتبر وارد کنید.")
+    save_setting("surfshark_1year_price", str(new_price))
+    clear_state(ADMIN_ID)
+    bot.send_message(msg.chat.id, f"✅ قیمت Surfshark یه ساله به <b>{fmt(new_price)} تومان</b> تغییر یافت.")
+
+# ── روش‌های پرداخت ────────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_payment_methods" and c.from_user.id == ADMIN_ID)
+def cb_ap_payment_methods(call):
+    bot.answer_callback_query(call.id)
+    card_icon   = "✅" if PAYMENT_CARD_ENABLED   else "❌"
+    crypto_icon = "✅" if PAYMENT_CRYPTO_ENABLED else "❌"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(f"{card_icon} کارت به کارت",  callback_data="ap_toggle_card_pay"))
+    kb.add(types.InlineKeyboardButton(f"{crypto_icon} ترون (TRX)", callback_data="ap_toggle_crypto_pay"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",                 callback_data="ap_settings"))
+    bot.send_message(call.message.chat.id,
+        "💳 <b>روش‌های پرداخت</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{card_icon} کارت به کارت: <b>{'فعال' if PAYMENT_CARD_ENABLED else 'غیرفعال'}</b>\n"
+        f"{crypto_icon} ترون (TRX): <b>{'فعال' if PAYMENT_CRYPTO_ENABLED else 'غیرفعال'}</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data in ("ap_toggle_card_pay","ap_toggle_crypto_pay") and c.from_user.id == ADMIN_ID)
+def cb_ap_toggle_payment(call):
+    bot.answer_callback_query(call.id)
+    if call.data == "ap_toggle_card_pay":
+        new_val = "0" if PAYMENT_CARD_ENABLED else "1"
+        save_setting("payment_card_enabled", new_val)
+        lbl = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
+        bot.send_message(call.message.chat.id, f"💳 کارت به کارت: <b>{lbl}</b>")
+    else:
+        new_val = "0" if PAYMENT_CRYPTO_ENABLED else "1"
+        save_setting("payment_crypto_enabled", new_val)
+        lbl = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
+        bot.send_message(call.message.chat.id, f"🔷 ترون (TRX): <b>{lbl}</b>")
 
 # ── پاکسازی داده‌ها ───────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data == "ap_cleanup" and c.from_user.id == ADMIN_ID)
