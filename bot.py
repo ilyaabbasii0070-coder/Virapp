@@ -172,6 +172,10 @@ def init_db():
             conn.execute("ALTER TABLE wallet_requests ADD COLUMN file_id TEXT")
             conn.commit()
         except Exception: pass
+        try:
+            conn.execute("ALTER TABLE surfshark_orders ADD COLUMN order_code TEXT")
+            conn.commit()
+        except Exception: pass
 
         cnt = conn.execute("SELECT COUNT(*) as c FROM products").fetchone()["c"]
         if cnt == 0:
@@ -1420,11 +1424,22 @@ def cb_surf_payment(call):
     else:
         _surfshark_crypto_payment(uid, call.message.chat.id, total)
 
+def _gen_surf_order_code():
+    """یک کد سفارش ۸ رقمی یکتا برای Surfshark می‌سازد (برای پیگیری توسط مشتری)"""
+    with get_db() as conn:
+        for _ in range(30):
+            code = ''.join(random.choices(string.digits, k=8))
+            exists = conn.execute("SELECT 1 FROM surfshark_orders WHERE order_code=?", (code,)).fetchone()
+            if not exists:
+                return code
+    return ''.join(random.choices(string.digits, k=8))
+
 def _create_surfshark_order(user_id, chat_id, total, payment_method, receipt_file_id=None):
+    order_code = _gen_surf_order_code()
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO surfshark_orders(user_id,order_type,total_price,payment_method,status,receipt_file_id) VALUES(?,?,?,?,?,?)",
-            (user_id, "1year", total, payment_method, "pending", receipt_file_id)
+            "INSERT INTO surfshark_orders(user_id,order_type,total_price,payment_method,status,receipt_file_id,order_code) VALUES(?,?,?,?,?,?,?)",
+            (user_id, "1year", total, payment_method, "pending", receipt_file_id, order_code)
         )
         order_id = cur.lastrowid
         conn.commit()
@@ -1438,6 +1453,7 @@ def _create_surfshark_order(user_id, chat_id, total, payment_method, receipt_fil
         f"🦈 <b>سفارش Surfshark جدید</b>\n\n"
         f"👤 @{uname}  |  <code>{user_id}</code>\n"
         f"🕐 {now_str()}\n\n"
+        f"📋 شماره سفارش: <code>{order_code}</code>\n"
         f"📅 یه ساله نامحدود\n"
         f"💰 {fmt(total)} تومان\n"
         f"💳 پرداخت: {payment_method}"
@@ -1453,6 +1469,8 @@ def _create_surfshark_order(user_id, chat_id, total, payment_method, receipt_fil
     bot.send_message(chat_id,
         "📥 <b>سفارش ثبت شد!</b> ✅\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📋 <b>شماره سفارش شما:</b> <code>{order_code}</code>\n"
+        "💡 این شماره را نزد خود نگه دارید تا در صورت بروز مشکل، برای پیگیری به پشتیبانی اعلام کنید.\n\n"
         "⏳ <b>در حال بررسی...</b>\n\n"
         "📌 پس از تایید، راهنمای فعال‌سازی ارسال می‌شود.\n\n"
         f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
@@ -1918,25 +1936,27 @@ def _ask_surfshark_qr(chat_id):
     )
 
 def _handle_surfshark_qr_final(msg):
-    """کاربر بعد از رسید، QR کد رو فرستاده — حالا هر دو رو ذخیره و به ادمین می‌فرستیم"""
+    """کاربر بعد از رسید، QR کد رو فرستاده — رسید و QR رو ذخیره می‌کنیم
+    ولی فقط رسید رو برای ادمین می‌فرستیم (QR بعد از تایید رسید نشون داده می‌شه)"""
     state = get_state(msg.from_user.id)
     total           = state.get("surf_total", SURFSHARK_1YEAR_PRICE)
     payment_method  = state.get("surf_payment", "card")
     receipt_file_id = state.get("surf_receipt_file_id")
     qr_file_id      = msg.photo[-1].file_id
+    order_code      = _gen_surf_order_code()
 
     u = get_user(msg.from_user.id); uname = u["username"] or u["full_name"] or str(msg.from_user.id)
 
     # ثبت سفارش در دیتابیس با هر دو فایل
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO surfshark_orders(user_id,order_type,total_price,payment_method,status,receipt_file_id,qr_file_id) VALUES(?,?,?,?,?,?,?)",
-            (msg.from_user.id, "1year", total, payment_method, "pending", receipt_file_id, qr_file_id)
+            "INSERT INTO surfshark_orders(user_id,order_type,total_price,payment_method,status,receipt_file_id,qr_file_id,order_code) VALUES(?,?,?,?,?,?,?,?)",
+            (msg.from_user.id, "1year", total, payment_method, "pending", receipt_file_id, qr_file_id, order_code)
         )
         order_id = cur.lastrowid
         conn.commit()
 
-    # ارسال رسید به ادمین
+    # ارسال فقط رسید به ادمین (QR ذخیره شد، بعد از تایید نمایش داده می‌شود)
     adm_kb = types.InlineKeyboardMarkup(row_width=2)
     adm_kb.add(
         types.InlineKeyboardButton("✅ تایید", callback_data=f"surf_ok_{order_id}"),
@@ -1946,20 +1966,16 @@ def _handle_surfshark_qr_final(msg):
         f"🦈 <b>سفارش Surfshark — رسید</b>\n\n"
         f"👤 @{uname}  |  <code>{msg.from_user.id}</code>\n"
         f"🕐 {now_str()}\n\n"
+        f"📋 شماره سفارش: <code>{order_code}</code>\n"
         f"📅 یه ساله نامحدود\n"
         f"💰 {fmt(total)} تومان\n"
         f"💳 پرداخت: {payment_method}\n\n"
-        f"📸 QR کد در پیام بعدی ارسال می‌شود"
+        f"📸 QR کد بعد از تایید رسید نمایش داده می‌شود"
     )
     if receipt_file_id:
         adm_msg = bot.send_photo(ADMIN_ID, receipt_file_id, caption=caption, reply_markup=adm_kb)
     else:
         adm_msg = bot.send_message(ADMIN_ID, caption, reply_markup=adm_kb)
-
-    # ارسال QR کد به ادمین (بدون دکمه — فقط برای مشاهده)
-    bot.send_photo(ADMIN_ID, qr_file_id,
-        caption=f"📸 <b>QR کد Surfshark</b> — سفارش #{order_id}\n\n⬇️ بعد از تایید رسید، این QR رو اسکن کن"
-    )
 
     with get_db() as conn:
         conn.execute("UPDATE surfshark_orders SET admin_msg_id=? WHERE id=?", (adm_msg.message_id, order_id))
@@ -1969,6 +1985,8 @@ def _handle_surfshark_qr_final(msg):
     bot.send_message(msg.chat.id,
         "📸 <b>رسید و QR کد دریافت شد!</b> ✅\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📋 <b>شماره سفارش شما:</b> <code>{order_code}</code>\n"
+        "💡 این شماره را نزد خود نگه دارید تا در صورت بروز مشکل، برای پیگیری به پشتیبانی اعلام کنید.\n\n"
         "⏳ منتظر تایید ادمین باشید.\n\n"
         "📌 پس از تایید، اکانت Surfshark شما فعال می‌شود.\n\n"
         f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
@@ -2019,33 +2037,93 @@ def cb_surf_approve(call):
     if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     order_id = int(call.data[8:])
     bot.answer_callback_query(call.id)
-    # تایید رسید، حالا باید QR کاربر رو بگیریم
     with get_db() as conn:
         order = conn.execute("SELECT * FROM surfshark_orders WHERE id=?", (order_id,)).fetchone()
         conn.execute("UPDATE surfshark_orders SET status='receipt_approved' WHERE id=?", (order_id,))
         conn.commit()
     if not order: return
+    code = order["order_code"] or str(order_id)
+
+    if order["qr_file_id"]:
+        # QR از قبل توسط مشتری همراه رسید ارسال شده — همینجا نشونش بده
+        try:
+            bot.edit_message_reply_markup(ADMIN_ID, order["admin_msg_id"], reply_markup=None)
+        except Exception:
+            pass
+        done_kb = types.InlineKeyboardMarkup(row_width=1)
+        done_kb.add(types.InlineKeyboardButton("✅ تمام", callback_data=f"surf_done_{order_id}"))
+        bot.send_photo(ADMIN_ID, order["qr_file_id"],
+            caption=(
+                f"📸 <b>QR کد Surfshark</b> — سفارش #{code}\n\n"
+                "⬇️ این QR رو با اکانت Surfshark اسکن کن، بعد دکمه «تمام» رو بزن\n\n"
+                "<i>با زدن «تمام»، رسید و این عکس از این چت پاک می‌شن و پیام فعال‌سازی برای کاربر ارسال می‌شه.</i>"
+            ),
+            reply_markup=done_kb
+        )
+        try:
+            bot.send_message(order["user_id"],
+                "✅ <b>رسید شما تایید شد!</b>\n\n"
+                "⏳ اکانت شما در حال فعال‌سازی است، چند لحظه صبر کنید..."
+            )
+        except Exception as e:
+            print(f"[surf_approve] {e}")
+    else:
+        # فلوی قدیمی — هنوز QR از کاربر نرسیده، الان درخواست می‌کنیم
+        safe_delete(ADMIN_ID, order["admin_msg_id"])
+        set_state(order["user_id"], step="surfshark_qr_wait", surf_order_id=order_id)
+        try:
+            bot.send_message(order["user_id"],
+                "✅ <b>رسید تایید شد!</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📸 <b>حالا عکس QR کد Surfshark رو ارسال کنید:</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📋 <b>راهنما:</b>\n\n"
+                "  1️⃣  وارد برنامه‌ی Surfshark بشید\n"
+                "  2️⃣  روی <b>Login</b> بزنید\n"
+                "  3️⃣  روی <b>Log in with another device</b> کلیک کنید\n"
+                "  4️⃣  از QR کد یک <b>اسکرین‌شات</b> بگیرید\n"
+                "  5️⃣  اسکرین‌شات را اینجا ارسال کنید\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"❓ سوال؟ @{SUPPORT_USERNAME}"
+            )
+        except Exception as e:
+            print(f"[surf_approve] {e}")
+        bot.send_message(ADMIN_ID, f"✅ رسید سفارش #{code} تایید شد. منتظر QR کاربر باش.")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("surf_done_"))
+def cb_surf_done(call):
+    """ادمین بعد از اسکن QR، روی «تمام» می‌زند: رسید و عکس QR پاک می‌شوند و پیام فعال‌سازی برای کاربر ارسال می‌شود"""
+    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    order_id = int(call.data[10:])
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        order = conn.execute("SELECT * FROM surfshark_orders WHERE id=?", (order_id,)).fetchone()
+        conn.execute("UPDATE surfshark_orders SET status='delivered' WHERE id=?", (order_id,))
+        conn.commit()
+    if not order: return
+    code = order["order_code"] or str(order_id)
+
+    # پاک کردن رسید و عکس QR از چت ادمین
     safe_delete(ADMIN_ID, order["admin_msg_id"])
-    # پیام به کاربر برای ارسال QR
-    set_state(order["user_id"], step="surfshark_qr_wait", surf_order_id=order_id)
+    safe_delete(ADMIN_ID, call.message.message_id)
+
     try:
         bot.send_message(order["user_id"],
-            "✅ <b>رسید تایید شد!</b>\n\n"
+            "🎉 <b>اکانت Surfshark شما فعال شد!</b> 🦈\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📸 <b>حالا عکس QR کد Surfshark رو ارسال کنید:</b>\n\n"
+            "✅ <b>تایید شد — شما وارد اکانت Surfshark شدید!</b>\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📋 <b>راهنما:</b>\n\n"
-            "  1️⃣  وارد برنامه‌ی Surfshark بشید\n"
-            "  2️⃣  روی <b>Login</b> بزنید\n"
-            "  3️⃣  روی <b>Log in with another device</b> کلیک کنید\n"
-            "  4️⃣  از QR کد یک <b>اسکرین‌شات</b> بگیرید\n"
-            "  5️⃣  اسکرین‌شات را اینجا ارسال کنید\n\n"
+            "📱 <b>راهنمای استفاده:</b>\n\n"
+            "  ✅ وارد برنامه Surfshark بشید\n"
+            "  ✅ به سرور دلخواه وصل بشید\n"
+            "  ✅ از اینترنت نامحدود لذت ببرید!\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"❓ سوال؟ @{SUPPORT_USERNAME}"
+            f"🆘 پشتیبانی: @{SUPPORT_USERNAME}\n"
+            "💙 از اعتماد شما سپاسگزاریم! 🌟"
         )
     except Exception as e:
-        print(f"[surf_approve] {e}")
-    bot.send_message(ADMIN_ID, f"✅ رسید سفارش #{order_id} تایید شد. منتظر QR کاربر باش.")
+        print(f"[surf_done] {e}")
+    bot.send_message(ADMIN_ID, f"✅ سفارش Surfshark #{code} تحویل داده شد و پیام‌های رسید/QR پاک شدند.")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("surf_rej_"))
 def cb_surf_reject(call):
@@ -2057,6 +2135,7 @@ def cb_surf_reject(call):
         conn.execute("UPDATE surfshark_orders SET status='rejected' WHERE id=?", (order_id,))
         conn.commit()
     if not order: return
+    code = order["order_code"] or str(order_id)
     safe_delete(ADMIN_ID, order["admin_msg_id"])
     try:
         bot.send_message(order["user_id"],
@@ -2065,7 +2144,7 @@ def cb_surf_reject(call):
             f"📞 پیگیری: @{SUPPORT_USERNAME}"
         )
     except Exception: pass
-    bot.send_message(ADMIN_ID, f"❌ سفارش Surfshark #{order_id} رد شد.")
+    bot.send_message(ADMIN_ID, f"❌ سفارش Surfshark #{code} رد شد.")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("surf_qr_ok_"))
 def cb_surf_qr_ok(call):
@@ -3294,6 +3373,7 @@ def cb_ap_surfshark_settings(call):
     kb.add(types.InlineKeyboardButton(f"{surf_icon} Surfshark در فروشگاه", callback_data="ap_toggle_surfshark"))
     kb.add(types.InlineKeyboardButton(f"{v2ray_icon} V2Ray در فروشگاه",    callback_data="ap_toggle_v2ray"))
     kb.add(types.InlineKeyboardButton("💰 تغییر قیمت یه ساله Surfshark",   callback_data="ap_surf_price"))
+    kb.add(types.InlineKeyboardButton("📋 رسیدهای قبلی Surfshark",         callback_data="ap_surf_receipts"))
     kb.add(types.InlineKeyboardButton("🔙 تنظیمات",                         callback_data="ap_settings"))
     bot.send_message(call.message.chat.id,
         "🦈 <b>تنظیمات Surfshark</b>\n\n"
@@ -3340,6 +3420,95 @@ def adm_surf_price(msg):
     save_setting("surfshark_1year_price", str(new_price))
     clear_state(ADMIN_ID)
     bot.send_message(msg.chat.id, f"✅ قیمت Surfshark یه ساله به <b>{fmt(new_price)} تومان</b> تغییر یافت.")
+
+# ── رسیدهای قبلی Surfshark ────────────────────────
+SURF_STATUS_FA = {
+    "pending":           "🕓 در انتظار بررسی",
+    "receipt_approved":  "📦 رسید تایید شده — منتظر اسکن QR",
+    "delivered":         "✅ تحویل داده شده",
+    "rejected":          "❌ رد شده",
+    "qr_received":       "📸 QR دریافت شده",
+    "qr_rejected":       "❌ QR رد شده",
+}
+
+def _show_surf_receipts_list(chat_id, page=0):
+    limit = 10; offset = page * limit
+    with get_db() as conn:
+        rows  = conn.execute("SELECT * FROM surfshark_orders ORDER BY created_at DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+        total = conn.execute("SELECT COUNT(*) as c FROM surfshark_orders").fetchone()["c"]
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🔍 جستجو با شماره سفارش", callback_data="ap_surf_search"))
+    if not rows:
+        kb.add(types.InlineKeyboardButton("🔙 تنظیمات Surfshark", callback_data="ap_surfshark_settings"))
+        return bot.send_message(chat_id, "📋 هیچ سفارش Surfshark ثبت نشده.", reply_markup=kb)
+    for r in rows:
+        code = r["order_code"] or str(r["id"])
+        icon = SURF_STATUS_FA.get(r["status"], "•")[:2]
+        kb.add(types.InlineKeyboardButton(f"{icon} سفارش #{code}", callback_data=f"ap_surf_view_{r['id']}"))
+    nav = []
+    if page > 0: nav.append(types.InlineKeyboardButton("◀️ قبلی", callback_data=f"ap_surf_receipts_{page-1}"))
+    if offset + limit < total: nav.append(types.InlineKeyboardButton("بعدی ▶️", callback_data=f"ap_surf_receipts_{page+1}"))
+    if nav: kb.add(*nav)
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات Surfshark", callback_data="ap_surfshark_settings"))
+    bot.send_message(chat_id, f"📋 <b>رسیدهای Surfshark</b> ({total} سفارش) — صفحه {page+1}:", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_surf_receipts" and c.from_user.id == ADMIN_ID)
+def cb_ap_surf_receipts(call):
+    bot.answer_callback_query(call.id)
+    _show_surf_receipts_list(call.message.chat.id, 0)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_surf_receipts_") and c.from_user.id == ADMIN_ID)
+def cb_ap_surf_receipts_page(call):
+    bot.answer_callback_query(call.id)
+    page = int(call.data[len("ap_surf_receipts_"):])
+    _show_surf_receipts_list(call.message.chat.id, page)
+
+def _resend_surf_order(chat_id, order_id):
+    with get_db() as conn:
+        order = conn.execute("SELECT * FROM surfshark_orders WHERE id=?", (order_id,)).fetchone()
+    if not order:
+        return bot.send_message(chat_id, "❌ سفارش یافت نشد.")
+    u = get_user(order["user_id"])
+    uname = (u["username"] or u["full_name"] or str(order["user_id"])) if u else str(order["user_id"])
+    code = order["order_code"] or str(order["id"])
+    status_fa = SURF_STATUS_FA.get(order["status"], order["status"])
+    caption = (
+        f"🦈 <b>سفارش Surfshark #{code}</b>\n\n"
+        f"👤 @{uname}  |  <code>{order['user_id']}</code>\n"
+        f"🕐 {order['created_at'][:16]}\n\n"
+        f"📅 یه ساله نامحدود\n"
+        f"💰 {fmt(order['total_price'])} تومان\n"
+        f"💳 پرداخت: {order['payment_method']}\n"
+        f"📌 وضعیت: {status_fa}"
+    )
+    if order["receipt_file_id"]:
+        bot.send_photo(chat_id, order["receipt_file_id"], caption=caption)
+    else:
+        bot.send_message(chat_id, caption)
+    if order["qr_file_id"]:
+        bot.send_photo(chat_id, order["qr_file_id"], caption=f"📸 QR کد سفارش #{code}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_surf_view_") and c.from_user.id == ADMIN_ID)
+def cb_ap_surf_view(call):
+    bot.answer_callback_query(call.id)
+    order_id = int(call.data[len("ap_surf_view_"):])
+    _resend_surf_order(call.message.chat.id, order_id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_surf_search" and c.from_user.id == ADMIN_ID)
+def cb_ap_surf_search(call):
+    bot.answer_callback_query(call.id)
+    set_state(ADMIN_ID, step="adm_surf_search")
+    bot.send_message(call.message.chat.id, "🔍 شماره سفارش (۸ رقمی) را ارسال کنید:")
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_surf_search")
+def adm_surf_search(msg):
+    code = (msg.text or "").strip()
+    with get_db() as conn:
+        order = conn.execute("SELECT * FROM surfshark_orders WHERE order_code=?", (code,)).fetchone()
+    if not order:
+        return bot.send_message(msg.chat.id, "❌ سفارشی با این شماره یافت نشد.")
+    clear_state(ADMIN_ID)
+    _resend_surf_order(msg.chat.id, order["id"])
 
 # ── روش‌های پرداخت ────────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data == "ap_payment_methods" and c.from_user.id == ADMIN_ID)
