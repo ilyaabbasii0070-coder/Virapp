@@ -50,10 +50,11 @@ crypto_stop_events: dict = {}
 agent_bots: dict = {}
 _svc_refresh: dict = {}  # user_id → threading.Event (auto-refresh usage)
 
-FREE_TRIAL_ENABLED = False
-FREE_TRIAL_DAYS    = 1
-FREE_TRIAL_GB      = 1
-FREE_TRIAL_CONFIG  = ""
+FREE_TRIAL_ENABLED  = False
+FREE_TRIAL_DAYS     = 1
+FREE_TRIAL_GB       = 1
+FREE_TRIAL_CONFIG   = ""
+FREE_TRIAL_SUB_LINK = ""  # ساب‌لینک تست رایگان برای چک حجم
 
 APP_LINK_IOS     = ""
 APP_LINK_ANDROID = ""
@@ -129,6 +130,10 @@ def init_db():
             bot_token TEXT NOT NULL, status TEXT DEFAULT 'pending',
             admin_msg_id INTEGER, created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS free_trial_used (
+            user_id INTEGER PRIMARY KEY,
+            used_at TEXT DEFAULT (datetime('now'))
+        );
         """)
         try:
             conn.execute("ALTER TABLE order_services ADD COLUMN sub_link TEXT")
@@ -136,6 +141,10 @@ def init_db():
         except Exception: pass
         try:
             conn.execute("ALTER TABLE agency_requests ADD COLUMN agent_chat_id INTEGER")
+            conn.commit()
+        except Exception: pass
+        try:
+            conn.execute("ALTER TABLE agency_requests ADD COLUMN shop_name TEXT")
             conn.commit()
         except Exception: pass
         try:
@@ -170,6 +179,7 @@ def init_db():
             ("free_trial_days",   str(FREE_TRIAL_DAYS)),
             ("free_trial_gb",     str(FREE_TRIAL_GB)),
             ("free_trial_config", ""),
+            ("free_trial_sub_link", ""),
             ("app_link_ios",      ""),
             ("app_link_android",  ""),
             ("group_id",          ""),
@@ -211,7 +221,7 @@ def save_setting(key, value):
 
 def _reload_settings(conn=None):
     global CARD_NUMBER, CARD_OWNER, TRX_WALLET, SUPPORT_USERNAME, REFERRAL_BONUS
-    global FREE_TRIAL_ENABLED, FREE_TRIAL_DAYS, FREE_TRIAL_GB, FREE_TRIAL_CONFIG
+    global FREE_TRIAL_ENABLED, FREE_TRIAL_DAYS, FREE_TRIAL_GB, FREE_TRIAL_CONFIG, FREE_TRIAL_SUB_LINK
     global APP_LINK_IOS, APP_LINK_ANDROID, GROUP_ID, PANEL_URL, PANEL_TOKEN
     global NOTIFY_NEW_USER, NOTIFY_NEW_ORDER, WELCOME_TEXT
     def _q(c):
@@ -230,6 +240,7 @@ def _reload_settings(conn=None):
     FREE_TRIAL_DAYS    = int(d.get("free_trial_days", str(FREE_TRIAL_DAYS)))
     FREE_TRIAL_GB      = int(d.get("free_trial_gb",   str(FREE_TRIAL_GB)))
     FREE_TRIAL_CONFIG  = d.get("free_trial_config", "")
+    FREE_TRIAL_SUB_LINK= d.get("free_trial_sub_link", "")
     APP_LINK_IOS       = d.get("app_link_ios",      "")
     APP_LINK_ANDROID   = d.get("app_link_android",  "")
     GROUP_ID           = d.get("group_id",          "")
@@ -807,27 +818,122 @@ def cb_menu_panel(call):
     )
 
 # ── تست رایگان ─────────────────────────────────
+def _check_and_auto_disable_trial():
+    """اگر ساب‌لینک تست رایگان تنظیم شده و حجمش تموم شده، خودکار غیرفعال کن"""
+    if not FREE_TRIAL_ENABLED:
+        return
+    if not FREE_TRIAL_SUB_LINK or not FREE_TRIAL_SUB_LINK.startswith("http"):
+        return
+    info = get_sub_info(FREE_TRIAL_SUB_LINK)
+    if info and info["total"] > 0 and info["remaining_bytes"] == 0:
+        save_setting("free_trial_enabled", "0")
+        print("[free_trial] حجم کانفیگ تموم شد — تست رایگان خودکار غیرفعال شد")
+        try:
+            bot.send_message(ADMIN_ID,
+                "⚠️ <b>تست رایگان خودکار غیرفعال شد!</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📦 حجم کانفیگ تست رایگان به اتمام رسید.\n\n"
+                "🔐 برای فعال‌سازی مجدد، کانفیگ جدید تنظیم کنید."
+            )
+        except Exception: pass
+
 @bot.callback_query_handler(func=lambda c: c.data == "menu_free_test")
 def cb_free_test(call):
     bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    safe_delete(call.message.chat.id, call.message.message_id)
+
+    # چک خودکار حجم ساب‌لینک
+    _check_and_auto_disable_trial()
+
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_main"))
-    safe_delete(call.message.chat.id, call.message.message_id)
-    bot.send_message(call.message.chat.id,
-        "📦 <b>تست رایگان ViraNet</b>\n\n"
+
+    if not FREE_TRIAL_ENABLED or not FREE_TRIAL_CONFIG:
+        bot.send_message(call.message.chat.id,
+            "📦 <b>تست رایگان ViraNet</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🙏 <b>ممنون از علاقه‌مندی شما!</b>\n\n"
+            "⏳ متأسفانه در حال حاضر <b>تست رایگان</b> در دسترس نیست.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "💡 <b>پیشنهاد ما:</b>\n\n"
+            "   🌸 پلن <b>پلوتو</b> با کمترین قیمت را امتحان کنید\n"
+            "   📦 ۲ گیگابایت | ۳۰ روز\n"
+            "   ✅ فعال‌سازی فوری\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🔔 به زودی تست رایگان فعال می‌شود!\n\n"
+            f"❓ اطلاعات بیشتر: @{SUPPORT_USERNAME}",
+            reply_markup=kb
+        )
+        return
+
+    # چک یک‌بار استفاده
+    with get_db() as conn:
+        already_used = conn.execute("SELECT 1 FROM free_trial_used WHERE user_id=?", (uid,)).fetchone()
+
+    if already_used:
+        bot.send_message(call.message.chat.id,
+            "📦 <b>تست رایگان ViraNet</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "⚠️ <b>شما قبلاً از تست رایگان استفاده کرده‌اید!</b>\n\n"
+            "هر کاربر فقط یک بار می‌تواند از تست رایگان استفاده کند.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "💡 برای خرید سرویس کامل از فروشگاه اقدام کنید.\n\n"
+            f"❓ پشتیبانی: @{SUPPORT_USERNAME}",
+            reply_markup=kb
+        )
+        return
+
+    # ثبت استفاده
+    with get_db() as conn:
+        conn.execute("INSERT OR IGNORE INTO free_trial_used(user_id) VALUES(?)", (uid,))
+        conn.commit()
+
+    safe_cfg = html_lib.escape(FREE_TRIAL_CONFIG)
+    sub_is_url = FREE_TRIAL_SUB_LINK.startswith("http")
+
+    kb2 = types.InlineKeyboardMarkup(row_width=1)
+    if sub_is_url:
+        kb2.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=FREE_TRIAL_SUB_LINK))
+    kb2.add(types.InlineKeyboardButton("🛒 خرید سرویس کامل", callback_data="menu_shop"))
+    kb2.add(types.InlineKeyboardButton("🏠 بازگشت به منو", callback_data="back_main"))
+
+    # QR کد
+    qr_buf = make_qr_bytes(FREE_TRIAL_SUB_LINK if sub_is_url else FREE_TRIAL_CONFIG)
+    if qr_buf:
+        try:
+            bot.send_photo(call.message.chat.id, qr_buf,
+                caption="📷 <b>QR کد تست رایگان — برای اسکن استفاده کنید</b>"
+            )
+        except Exception: pass
+
+    msg_text = (
+        "🎁 <b>تست رایگان ViraNet</b> 🎉\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🙏 <b>ممنون از علاقه‌مندی شما!</b>\n\n"
-        "⏳ متأسفانه در حال حاضر <b>تست رایگان</b> در دسترس نیست.\n\n"
+        f"📦 <b>حجم:</b>  {FREE_TRIAL_GB} گیگابایت\n"
+        f"📅 <b>مدت:</b>  {FREE_TRIAL_DAYS} روز\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "💡 <b>پیشنهاد ما:</b>\n\n"
-        "   🌸 پلن <b>پلوتو</b> با کمترین قیمت را امتحان کنید\n"
-        "   📦 ۲ گیگابایت | ۳۰ روز\n"
-        "   ✅ فعال‌سازی فوری\n\n"
+        "🔐 <b>کانفیگ</b>  👆 <i>بزنید تا کپی شود</i>\n\n"
+        f"<code>{safe_cfg}</code>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🔔 به زودی تست رایگان فعال می‌شود!\n\n"
-        f"❓ اطلاعات بیشتر: @{SUPPORT_USERNAME}",
-        reply_markup=kb
     )
+    if sub_is_url:
+        msg_text += (
+            "🔗 <b>ساب‌لینک</b>  👆 <i>بزنید تا کپی شود</i>\n\n"
+            f"<code>{html_lib.escape(FREE_TRIAL_SUB_LINK)}</code>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+    msg_text += (
+        "📌 <b>راهنمای اتصال:</b>\n\n"
+        "  1️⃣  کانفیگ را کپی کرده در اپ ایمپورت کنید\n"
+        "  2️⃣  یا دکمه ساب‌لینک زیر را بزنید\n"
+        "  3️⃣  یا QR کد بالا را اسکن کنید\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⚠️ <b>توجه:</b> این تست فقط یک بار برای شما فعال است.\n\n"
+        f"🆘 پشتیبانی: @{SUPPORT_USERNAME}\n"
+        "💙 از اعتماد شما سپاسگزاریم! 🌟"
+    )
+    bot.send_message(call.message.chat.id, msg_text, reply_markup=kb2)
 
 # ── درخواست نمایندگی ────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data == "menu_agency")
@@ -933,14 +1039,37 @@ def agency_chat_id_input(msg):
         )
     uid = msg.from_user.id
     state = get_state(uid)
+    set_state(uid, step="agency_shop_name", agency_token=state.get("agency_token",""), agency_chat_id=agent_chat_id)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="back_main"))
+    bot.send_message(msg.chat.id,
+        "✅ <b>آیدی دریافت شد!</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📌 <b>مرحله ۳:</b> نام فروشگاه یا برند خود را وارد کنید\n\n"
+        "💡 این نام در پیام خوش‌آمدگویی ربات شما نمایش داده می‌شود.\n\n"
+        "<i>مثال: ویرا نت | سرویس پرسرعت | VPN Pro</i>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 <b>نام فروشگاه خود را ارسال کنید:</b>",
+        reply_markup=kb
+    )
+
+@bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "agency_shop_name")
+def agency_shop_name_input(msg):
+    if is_offline_for(msg.from_user.id): return bot.send_message(msg.chat.id, OFFLINE_MSG)
+    shop_name = (msg.text or "").strip()[:50]
+    if not shop_name:
+        return bot.send_message(msg.chat.id, "⚠️ نام فروشگاه نمی‌تواند خالی باشد.")
+    uid = msg.from_user.id
+    state = get_state(uid)
     token = state.get("agency_token", "")
+    agent_chat_id = state.get("agency_chat_id", uid)
     u = get_user(uid); uname = u["username"] or u["full_name"] or str(uid)
 
     # ذخیره در DB
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO agency_requests(user_id,bot_token,agent_chat_id,status) VALUES(?,?,?,?)",
-            (uid, token, agent_chat_id, "pending")
+            "INSERT INTO agency_requests(user_id,bot_token,agent_chat_id,shop_name,status) VALUES(?,?,?,?,?)",
+            (uid, token, agent_chat_id, shop_name, "pending")
         )
         req_id = cur.lastrowid; conn.commit()
 
@@ -959,6 +1088,7 @@ def agency_chat_id_input(msg):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🤖 <b>توکن ربات:</b>\n<code>{token}</code>\n\n"
         f"🆔 <b>آیدی عددی نماینده:</b> <code>{agent_chat_id}</code>\n\n"
+        f"🏪 <b>نام فروشگاه:</b> {html_lib.escape(shop_name)}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👇 درخواست را تایید یا رد کنید:",
         reply_markup=adm_kb
@@ -993,9 +1123,10 @@ def cb_agency_approve(call):
         conn.commit()
     token = req["bot_token"]; uid = req["user_id"]
     agent_chat_id = req["agent_chat_id"] if req["agent_chat_id"] else uid
+    shop_name = req["shop_name"] if req["shop_name"] else "ویرا نت"
 
     # راه‌اندازی ربات نمایندگی در thread جداگانه
-    def run_agent_bot(agent_token, owner_id, owner_chat_id):
+    def run_agent_bot(agent_token, owner_id, owner_chat_id, sname):
         try:
             agent = telebot.TeleBot(agent_token, parse_mode="HTML")
 
@@ -1003,7 +1134,7 @@ def cb_agency_approve(call):
             def agent_start(msg):
                 ensure_user(msg.from_user)
                 agent.send_message(msg.chat.id,
-                    "✨ <b>به ویرا نت خوش آمدید!</b> 🎉\n\n"
+                    f"✨ <b>به {html_lib.escape(sname)} خوش آمدید!</b> 🎉\n\n"
                     "💎 <b>فروشگاه سرویس‌های اینترنتی</b>\n\n"
                     "⚡ سرعت بالا | 🛡️ امنیت کامل | 🔧 پشتیبانی ۲۴ ساعته\n\n"
                     "👇 از منوی زیر انتخاب کنید:",
@@ -1022,7 +1153,7 @@ def cb_agency_approve(call):
         except Exception as e:
             print(f"[agent bot] Error: {e}")
 
-    t = threading.Thread(target=run_agent_bot, args=(token, uid, agent_chat_id), daemon=True)
+    t = threading.Thread(target=run_agent_bot, args=(token, uid, agent_chat_id, shop_name), daemon=True)
     t.start()
 
     # پاک کردن پیام ادمین
@@ -2234,15 +2365,20 @@ def cb_ap_free_trial(call):
     kb.add(types.InlineKeyboardButton("📅 تعداد روز",              callback_data="ap_trial_days"))
     kb.add(types.InlineKeyboardButton("📦 حجم (گیگابایت)",         callback_data="ap_trial_gb"))
     kb.add(types.InlineKeyboardButton("🔐 کانفیگ تست رایگان",      callback_data="ap_trial_config"))
+    kb.add(types.InlineKeyboardButton("🔗 ساب‌لینک (چک حجم خودکار)", callback_data="ap_trial_sub"))
+    kb.add(types.InlineKeyboardButton("📊 چک حجم ساب‌لینک الان",   callback_data="ap_trial_check_sub"))
     kb.add(types.InlineKeyboardButton("🔙 تنظیمات",                callback_data="ap_settings"))
+    sub_status = f"<code>{FREE_TRIAL_SUB_LINK[:40]}...</code>" if len(FREE_TRIAL_SUB_LINK) > 40 else (f"<code>{FREE_TRIAL_SUB_LINK}</code>" if FREE_TRIAL_SUB_LINK else "<i>تنظیم نشده</i>")
     bot.send_message(call.message.chat.id,
         "🎁 <b>تست رایگان</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"وضعیت: <b>{status}</b>\n"
         f"⏱ مدت: <b>{FREE_TRIAL_DAYS} روز</b>\n"
         f"📦 حجم: <b>{FREE_TRIAL_GB} گیگ</b>\n"
-        f"🔐 کانفیگ: {'<i>تنظیم شده</i>' if FREE_TRIAL_CONFIG else '<i>تنظیم نشده</i>'}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🔐 کانفیگ: {'<i>تنظیم شده</i>' if FREE_TRIAL_CONFIG else '<i>تنظیم نشده</i>'}\n"
+        f"🔗 ساب‌لینک: {sub_status}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "💡 با تنظیم ساب‌لینک، وقتی حجم تموم شد تست رایگان خودکار غیرفعال می‌شود.",
         reply_markup=kb
     )
 
@@ -2300,6 +2436,71 @@ def adm_trial_settings(msg):
         if not val: return bot.send_message(msg.chat.id, "⚠️ کانفیگ نمی‌تواند خالی باشد.")
         save_setting("free_trial_config", val); clear_state(ADMIN_ID)
         bot.send_message(msg.chat.id, "✅ کانفیگ تست رایگان ذخیره شد.")
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_sub" and c.from_user.id == ADMIN_ID)
+def cb_ap_trial_sub(call):
+    bot.answer_callback_query(call.id)
+    set_state(ADMIN_ID, step="adm_trial_sub")
+    cur_sub = FREE_TRIAL_SUB_LINK or "<i>تنظیم نشده</i>"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🗑️ حذف ساب‌لینک", callback_data="ap_trial_sub_del"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="ap_free_trial"))
+    bot.send_message(call.message.chat.id,
+        "🔗 <b>ساب‌لینک تست رایگان</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"ساب‌لینک فعلی: {cur_sub}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "💡 با تنظیم ساب‌لینک:\n"
+        "   ✅ ربات به طور خودکار حجم کانفیگ را چک می‌کند\n"
+        "   ✅ وقتی حجم تموم شد، تست رایگان خودکار غیرفعال می‌شود\n\n"
+        "👇 ساب‌لینک جدید را ارسال کنید:\n"
+        "<i>(مثال: https://sub.example.com/...)</i>",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_sub_del" and c.from_user.id == ADMIN_ID)
+def cb_ap_trial_sub_del(call):
+    bot.answer_callback_query(call.id)
+    save_setting("free_trial_sub_link", "")
+    clear_state(ADMIN_ID)
+    bot.send_message(call.message.chat.id, "✅ ساب‌لینک تست رایگان حذف شد.")
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_check_sub" and c.from_user.id == ADMIN_ID)
+def cb_ap_trial_check_sub(call):
+    bot.answer_callback_query(call.id, "⏳ در حال چک کردن...")
+    if not FREE_TRIAL_SUB_LINK or not FREE_TRIAL_SUB_LINK.startswith("http"):
+        return bot.send_message(call.message.chat.id,
+            "❌ ساب‌لینک تنظیم نشده است.\n\n"
+            "ابتدا ساب‌لینک را از دکمه «ساب‌لینک» تنظیم کنید."
+        )
+    info = get_sub_info(FREE_TRIAL_SUB_LINK)
+    if not info:
+        return bot.send_message(call.message.chat.id,
+            "❌ <b>خطا در دریافت اطلاعات ساب‌لینک</b>\n\n"
+            "ممکن است ساب‌لینک معتبر نباشد یا سرور در دسترس نباشد."
+        )
+    usage_text = _build_usage_text(info)
+    auto_status = ""
+    if info["total"] > 0 and info["remaining_bytes"] == 0:
+        auto_status = "\n\n🔴 <b>حجم تموم شده!</b> تست رایگان خودکار غیرفعال خواهد شد."
+    bot.send_message(call.message.chat.id,
+        "📊 <b>وضعیت ساب‌لینک تست رایگان</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        + usage_text + auto_status
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_trial_sub")
+def adm_trial_sub_input(msg):
+    val = (msg.text or "").strip()
+    if not val.startswith("http"):
+        return bot.send_message(msg.chat.id, "⚠️ ساب‌لینک باید با http شروع شود.")
+    save_setting("free_trial_sub_link", val)
+    clear_state(ADMIN_ID)
+    bot.send_message(msg.chat.id,
+        "✅ <b>ساب‌لینک تست رایگان ذخیره شد!</b>\n\n"
+        f"<code>{html_lib.escape(val)}</code>\n\n"
+        "💡 از این به بعد، وقتی حجم کانفیگ تموم شود، تست رایگان خودکار غیرفعال می‌شود."
+    )
 
 # ── متن‌های ربات ─────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data == "ap_bot_texts" and c.from_user.id == ADMIN_ID)
@@ -3844,6 +4045,15 @@ init();
 </body>
 </html>"""
 
+def _trial_sub_monitor():
+    """هر ۵ دقیقه یک بار حجم ساب‌لینک تست رایگان را چک می‌کند"""
+    while True:
+        time.sleep(300)
+        try:
+            _check_and_auto_disable_trial()
+        except Exception as e:
+            print(f"[trial_monitor] {e}")
+
 # ─────────────────────────────────────────────
 #  FLASK
 # ─────────────────────────────────────────────
@@ -4039,4 +4249,6 @@ if __name__ == "__main__":
     print(f"🚀 ViraNet Bot | port={PORT} | admin={ADMIN_ID} | webapp={WEBAPP_URL or 'disabled'}")
     threading.Thread(target=run_flask, daemon=True).start()
     print("✅ Flask started")
+    threading.Thread(target=_trial_sub_monitor, daemon=True).start()
+    print("✅ Trial sub monitor started")
     bot.infinity_polling(timeout=60, long_polling_timeout=30)
