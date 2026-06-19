@@ -1795,12 +1795,13 @@ def _create_order_and_notify(user_id, chat_id, state, payment_method):
 def handle_all_photos(msg):
     if is_offline_for(msg.from_user.id): return bot.send_message(msg.chat.id, OFFLINE_MSG)
     step = get_state(msg.from_user.id).get("step")
-    if step == "shop_receipt_wait":              _handle_shop_receipt(msg)
-    elif step == "shop_crypto_receipt":          _handle_crypto_receipt(msg)
-    elif step == "wallet_receipt":               _handle_wallet_receipt(msg)
-    elif step == "surfshark_receipt_wait":       _handle_surfshark_receipt(msg)
-    elif step == "surfshark_crypto_receipt":     _handle_surfshark_crypto_receipt(msg)
-    elif step == "surfshark_qr_wait":            _handle_surfshark_qr(msg)
+    if step == "shop_receipt_wait":                _handle_shop_receipt(msg)
+    elif step == "shop_crypto_receipt":            _handle_crypto_receipt(msg)
+    elif step == "wallet_receipt":                 _handle_wallet_receipt(msg)
+    elif step == "surfshark_receipt_wait":         _handle_surfshark_receipt(msg)
+    elif step == "surfshark_crypto_receipt":       _handle_surfshark_crypto_receipt(msg)
+    elif step == "surfshark_qr_after_receipt":     _handle_surfshark_qr_final(msg)
+    elif step == "surfshark_qr_wait":              _handle_surfshark_qr(msg)
 
 def _handle_shop_receipt(msg):
     state = get_state(msg.from_user.id); order_id = state.get("order_id")
@@ -1887,16 +1888,95 @@ def _handle_surfshark_receipt(msg):
     state = get_state(msg.from_user.id)
     total = state.get("surf_total", SURFSHARK_1YEAR_PRICE)
     file_id = msg.photo[-1].file_id
-    _create_surfshark_order(msg.from_user.id, msg.chat.id, total, "card", file_id)
+    # رسید رو ذخیره می‌کنیم، state رو نگه می‌داریم و بعد QR می‌خوایم
+    set_state(msg.from_user.id, step="surfshark_qr_after_receipt",
+              surf_total=total, surf_payment="card", surf_receipt_file_id=file_id)
+    _ask_surfshark_qr(msg.chat.id)
 
 def _handle_surfshark_crypto_receipt(msg):
     state = get_state(msg.from_user.id)
     total = state.get("surf_total", SURFSHARK_1YEAR_PRICE)
     file_id = msg.photo[-1].file_id
-    _create_surfshark_order(msg.from_user.id, msg.chat.id, total, "crypto", file_id)
+    set_state(msg.from_user.id, step="surfshark_qr_after_receipt",
+              surf_total=total, surf_payment="crypto", surf_receipt_file_id=file_id)
+    _ask_surfshark_qr(msg.chat.id)
+
+def _ask_surfshark_qr(chat_id):
+    bot.send_message(chat_id,
+        "✅ <b>رسید دریافت شد!</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📸 <b>حالا عکس QR کد Surfshark رو ارسال کنید:</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📋 <b>راهنما:</b>\n\n"
+        "  1️⃣  وارد برنامه‌ی Surfshark بشید\n"
+        "  2️⃣  روی <b>Login</b> بزنید\n"
+        "  3️⃣  روی <b>Log in with another device</b> کلیک کنید\n"
+        "  4️⃣  از QR کد یک <b>اسکرین‌شات</b> بگیرید\n"
+        "  5️⃣  اسکرین‌شات را اینجا ارسال کنید\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"❓ سوال؟ @{SUPPORT_USERNAME}"
+    )
+
+def _handle_surfshark_qr_final(msg):
+    """کاربر بعد از رسید، QR کد رو فرستاده — حالا هر دو رو ذخیره و به ادمین می‌فرستیم"""
+    state = get_state(msg.from_user.id)
+    total           = state.get("surf_total", SURFSHARK_1YEAR_PRICE)
+    payment_method  = state.get("surf_payment", "card")
+    receipt_file_id = state.get("surf_receipt_file_id")
+    qr_file_id      = msg.photo[-1].file_id
+
+    u = get_user(msg.from_user.id); uname = u["username"] or u["full_name"] or str(msg.from_user.id)
+
+    # ثبت سفارش در دیتابیس با هر دو فایل
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO surfshark_orders(user_id,order_type,total_price,payment_method,status,receipt_file_id,qr_file_id) VALUES(?,?,?,?,?,?,?)",
+            (msg.from_user.id, "1year", total, payment_method, "pending", receipt_file_id, qr_file_id)
+        )
+        order_id = cur.lastrowid
+        conn.commit()
+
+    # ارسال رسید به ادمین
+    adm_kb = types.InlineKeyboardMarkup(row_width=2)
+    adm_kb.add(
+        types.InlineKeyboardButton("✅ تایید", callback_data=f"surf_ok_{order_id}"),
+        types.InlineKeyboardButton("❌ رد",    callback_data=f"surf_rej_{order_id}"),
+    )
+    caption = (
+        f"🦈 <b>سفارش Surfshark — رسید</b>\n\n"
+        f"👤 @{uname}  |  <code>{msg.from_user.id}</code>\n"
+        f"🕐 {now_str()}\n\n"
+        f"📅 یه ساله نامحدود\n"
+        f"💰 {fmt(total)} تومان\n"
+        f"💳 پرداخت: {payment_method}\n\n"
+        f"📸 QR کد در پیام بعدی ارسال می‌شود"
+    )
+    if receipt_file_id:
+        adm_msg = bot.send_photo(ADMIN_ID, receipt_file_id, caption=caption, reply_markup=adm_kb)
+    else:
+        adm_msg = bot.send_message(ADMIN_ID, caption, reply_markup=adm_kb)
+
+    # ارسال QR کد به ادمین (بدون دکمه — فقط برای مشاهده)
+    bot.send_photo(ADMIN_ID, qr_file_id,
+        caption=f"📸 <b>QR کد Surfshark</b> — سفارش #{order_id}\n\n⬇️ بعد از تایید رسید، این QR رو اسکن کن"
+    )
+
+    with get_db() as conn:
+        conn.execute("UPDATE surfshark_orders SET admin_msg_id=? WHERE id=?", (adm_msg.message_id, order_id))
+        conn.commit()
+
+    clear_state(msg.from_user.id)
+    bot.send_message(msg.chat.id,
+        "📸 <b>رسید و QR کد دریافت شد!</b> ✅\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ منتظر تایید ادمین باشید.\n\n"
+        "📌 پس از تایید، اکانت Surfshark شما فعال می‌شود.\n\n"
+        f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
+        f"❓ پیگیری: @{SUPPORT_USERNAME}"
+    )
 
 def _handle_surfshark_qr(msg):
-    """کاربر اسکرین شات QR کد surfshark رو فرستاده"""
+    """QR کد که بعد از تایید رسید توسط ادمین می‌آید (فلوی قدیمی — نگه داشته شده برای سازگاری)"""
     state = get_state(msg.from_user.id)
     order_id = state.get("surf_order_id")
     if not order_id: return bot.send_message(msg.chat.id, "⚠️ خطا: سفارش یافت نشد.")
