@@ -6409,32 +6409,16 @@ def cb_ap_support_bot(call):
 @bot.callback_query_handler(func=lambda c: c.data == "ap_support_bot_add" and is_admin(c.from_user.id))
 def cb_ap_support_bot_add(call):
     bot.answer_callback_query(call.id)
-    set_state(call.from_user.id, step="adm_support_bot_username")
+    # یوزرنیم ثابت است — فقط توکن لازم است
+    set_state(call.from_user.id, step="adm_support_bot_token", sb_username="Virasupport_bot")
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="ap_support_bot"))
     bot.send_message(
         call.message.chat.id,
         "🤖 <b>افزودن ربات پشتیبانی</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📌 <b>مرحله ۱:</b> یوزرنیم ربات پشتیبانی را ارسال کنید\n\n"
-        "💡 مثال: ViraNetSupport (بدون @)\n\n"
-        "👇 یوزرنیم ربات را وارد کنید:",
-        reply_markup=kb
-    )
-
-@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_support_bot_username")
-def adm_support_bot_username(msg):
-    val = (msg.text or "").strip().lstrip("@")
-    if not val or " " in val:
-        return bot.send_message(msg.chat.id, "⚠️ یوزرنیم نامعتبر است (بدون @ و بدون فاصله).")
-    set_state(msg.from_user.id, step="adm_support_bot_token", sb_username=val)
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="ap_support_bot"))
-    bot.send_message(
-        msg.chat.id,
-        f"✅ یوزرنیم <b>@{val}</b> دریافت شد.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📌 <b>مرحله ۲:</b> توکن ربات پشتیبانی را ارسال کنید\n\n"
+        "🤖 ربات: <b>@Virasupport_bot</b>\n\n"
+        "📌 توکن ربات پشتیبانی را ارسال کنید\n\n"
         "💡 توکن را از @BotFather دریافت کنید\n"
         "مثال: <code>1234567890:ABCdef...</code>\n\n"
         "👇 توکن ربات را وارد کنید:",
