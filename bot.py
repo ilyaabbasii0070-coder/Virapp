@@ -1460,9 +1460,34 @@ def cb_surf_payment(call):
         deduct_wallet(uid, total)
         _create_surfshark_order(uid, call.message.chat.id, total, "wallet")
     elif call.data == "surf_pay_card":
-        _surfshark_card_payment(uid, call.message.chat.id, total)
+        _ask_surf_discount(uid, call.message.chat.id, total)
     else:
         _surfshark_crypto_payment(uid, call.message.chat.id, total)
+
+def _ask_surf_discount(user_id, chat_id, total):
+    """قبل از پرداخت کارت به کارت سرفشارک، کد تخفیف می‌پرسد"""
+    set_state(user_id, step="surf_discount_wait", surf_total=total, surf_original_price=total)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="surf_no_discount"))
+    bot.send_message(chat_id,
+        f"🦈 <b>خرید Surfshark یه ساله</b>\n\n"
+        f"💰 <b>مبلغ:</b> {fmt(total)} تومان\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🏷️ <b>کد تخفیف دارید؟</b>\n\n"
+        "کد تخفیف خود را وارد کنید،\n"
+        "یا دکمه زیر را بزنید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "surf_no_discount")
+def cb_surf_no_discount(call):
+    if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
+    bot.answer_callback_query(call.id)
+    state = get_state(call.from_user.id)
+    if state.get("step") != "surf_discount_wait": return
+    total = state.get("surf_total", SURFSHARK_1YEAR_PRICE)
+    set_state(call.from_user.id, step="surfshark_payment", surf_total=total)
+    _surfshark_card_payment(call.from_user.id, call.message.chat.id, total)
 
 def _gen_surf_order_code():
     """یک کد سفارش ۸ رقمی یکتا برای Surfshark می‌سازد (برای پیگیری توسط مشتری)"""
@@ -4382,6 +4407,62 @@ def fallback(msg):
         except Exception:
             pass
         return
+
+    # ── کد تخفیف Surfshark ──────────────────────────
+    if step == "surf_discount_wait":
+        code = (msg.text or "").strip().upper()
+        original_total = state.get("surf_original_price", state.get("surf_total", SURFSHARK_1YEAR_PRICE))
+        disc = get_discount(code)
+        if not disc:
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="surf_no_discount"))
+            return bot.send_message(msg.chat.id,
+                "❌ <b>کد تخفیف معتبر نیست!</b>\n\n"
+                "کد دیگری وارد کنید یا دکمه زیر را بزنید:",
+                reply_markup=kb
+            )
+        new_price = apply_discount(original_total, disc["percent"])
+        set_state(msg.from_user.id, step="surfshark_payment",
+                  surf_total=new_price, surf_original_price=original_total,
+                  surf_order_type="1year")
+        bot.send_message(msg.chat.id,
+            f"✅ <b>کد تخفیف اعمال شد!</b>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🏷️ کد: <code>{code}</code>\n"
+            f"💰 تخفیف: <b>{disc['percent']}٪</b>\n\n"
+            f"💵 قیمت قبل: <s>{fmt(original_total)}</s> تومان\n"
+            f"✅ قیمت بعد از تخفیف: <b>{fmt(new_price)} تومان</b>"
+        )
+        return _surfshark_card_payment(msg.from_user.id, msg.chat.id, new_price)
+
+    # ── کد تخفیف V2Ray ──────────────────────────────
+    if step == "shop_discount_wait":
+        code = (msg.text or "").strip().upper()
+        original_price = state.get("original_price", state.get("total_price", 0))
+        disc = get_discount(code)
+        if not disc:
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="pay_no_discount"))
+            return bot.send_message(msg.chat.id,
+                "❌ <b>کد تخفیف معتبر نیست!</b>\n\n"
+                "کد دیگری وارد کنید یا دکمه زیر را بزنید:",
+                reply_markup=kb
+            )
+        new_price = apply_discount(original_price, disc["percent"])
+        set_state(msg.from_user.id, step="shop_payment", total_price=new_price,
+                  plan_key=state["plan_key"], quantity=state["quantity"],
+                  names=state["names"], original_price=original_price,
+                  discount_code=code, discount_percent=disc["percent"])
+        bot.send_message(msg.chat.id,
+            f"✅ <b>کد تخفیف اعمال شد!</b>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🏷️ کد: <code>{code}</code>\n"
+            f"💰 تخفیف: <b>{disc['percent']}٪</b>\n\n"
+            f"💵 قیمت قبل: <s>{fmt(original_price)}</s> تومان\n"
+            f"✅ قیمت بعد از تخفیف: <b>{fmt(new_price)} تومان</b>"
+        )
+        updated_state = get_state(msg.from_user.id)
+        return _create_order_and_notify(msg.from_user.id, msg.chat.id, updated_state, "card")
 
     u = get_user(msg.from_user.id)
     if u and u["is_banned"]: return
