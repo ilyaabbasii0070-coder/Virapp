@@ -152,8 +152,26 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT UNIQUE NOT NULL,
             percent INTEGER NOT NULL,
+            max_uses INTEGER DEFAULT 0,
+            used_count INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
             active INTEGER DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS discount_code_used (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            used_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(code, user_id)
+        );
+        CREATE TABLE IF NOT EXISTS receipt_tracking (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tracking_code TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            order_id INTEGER,
+            receipt_type TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(tracking_code)
         );
         CREATE TABLE IF NOT EXISTS expiry_notified (
             user_id INTEGER NOT NULL,
@@ -192,6 +210,14 @@ def init_db():
         except Exception: pass
         try:
             conn.execute("ALTER TABLE surfshark_orders ADD COLUMN order_code TEXT")
+            conn.commit()
+        except Exception: pass
+        try:
+            conn.execute("ALTER TABLE discount_codes ADD COLUMN max_uses INTEGER DEFAULT 0")
+            conn.commit()
+        except Exception: pass
+        try:
+            conn.execute("ALTER TABLE discount_codes ADD COLUMN used_count INTEGER DEFAULT 0")
             conn.commit()
         except Exception: pass
 
@@ -512,6 +538,95 @@ AI_SYSTEM = (
     "پاسخ دقیق، کاربردی و با کد Python بده. "
     "کدها را داخل ```python ``` بنویس. توضیحات را فارسی بنویس."
 )
+
+# ─────────────────────────────────────────────
+#  OCR رسید — استخراج کد پیگیری
+# ─────────────────────────────────────────────
+def extract_tracking_code_from_receipt(file_id: str) -> str | None:
+    """
+    عکس رسید را با Vision AI آنالیز می‌کند و کد پیگیری را برمی‌گرداند.
+    کد پیگیری ایران معمولاً ۱۲ تا ۲۲ رقمی است.
+    برای کار کردن باید OPENAI_API_KEY داشته باشید.
+    """
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        # دریافت فایل از تلگرام
+        file_info = bot.get_file(file_id)
+        file_url  = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+        img_resp  = requests.get(file_url, timeout=10)
+        if img_resp.status_code != 200:
+            return None
+        import base64
+        img_b64 = base64.b64encode(img_resp.content).decode()
+
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "gpt-4o-mini",
+            "max_tokens": 200,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "این رسید بانکی ایرانی است. "
+                            "کد پیگیری (tracking code / شماره مرجع / reference number / کد رهگیری) را پیدا کن. "
+                            "این عدد معمولاً ۱۲ تا ۲۶ رقم است. "
+                            "فقط عدد را بنویس، هیچ توضیح اضافه‌ای نده. "
+                            "اگر پیدا نکردی، فقط بنویس: NOTFOUND"
+                        )
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{img_b64}", "detail": "high"}
+                    }
+                ]
+            }]
+        }
+        r = requests.post("https://api.openai.com/v1/chat/completions",
+                          headers=headers, json=payload, timeout=30)
+        result = r.json()["choices"][0]["message"]["content"].strip()
+        # فقط اعداد رو نگه می‌داریم
+        digits = "".join(c for c in result if c.isdigit())
+        if len(digits) >= 10:
+            return digits
+        return None
+    except Exception as e:
+        print(f"[OCR] {e}")
+        return None
+
+def check_duplicate_receipt(tracking_code: str) -> dict | None:
+    """
+    بررسی می‌کند آیا این کد پیگیری قبلاً ثبت شده یا نه.
+    اگر تکراری بود، اطلاعات ثبت قبلی را برمی‌گرداند.
+    """
+    if not tracking_code:
+        return None
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT rt.*, u.username, u.full_name "
+            "FROM receipt_tracking rt "
+            "LEFT JOIN users u ON rt.user_id = u.user_id "
+            "WHERE rt.tracking_code = ? "
+            "AND rt.created_at >= datetime('now', '-30 days')",
+            (tracking_code,)
+        ).fetchone()
+    return dict(row) if row else None
+
+def save_tracking_code(tracking_code: str, user_id: int, order_id: int, receipt_type: str):
+    """کد پیگیری را در دیتابیس ذخیره می‌کند."""
+    if not tracking_code:
+        return
+    with get_db() as conn:
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO receipt_tracking(tracking_code, user_id, order_id, receipt_type) VALUES(?,?,?,?)",
+                (tracking_code, user_id, order_id, receipt_type)
+            )
+            conn.commit()
+        except Exception as e:
+            print(f"[tracking] {e}")
 
 # ─────────────────────────────────────────────
 #  STATE
@@ -1852,8 +1967,16 @@ def shop_discount_code_input(msg):
     if is_offline_for(msg.from_user.id): return bot.send_message(msg.chat.id, OFFLINE_MSG)
     code = (msg.text or "").strip().upper()
     state = get_state(msg.from_user.id)
-    disc = get_discount(code)
+    disc = get_discount(code, user_id=msg.from_user.id)
     original_price = state.get("original_price", state.get("total_price", 0))
+    if disc == "already_used":
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="pay_no_discount"))
+        return bot.send_message(msg.chat.id,
+            "❌ <b>شما قبلاً از این کد تخفیف استفاده کرده‌اید!</b>\n\n"
+            "کد دیگری وارد کنید یا دکمه زیر را بزنید:",
+            reply_markup=kb
+        )
     if not disc:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="pay_no_discount"))
@@ -1863,6 +1986,7 @@ def shop_discount_code_input(msg):
             reply_markup=kb
         )
     new_price = apply_discount(original_price, disc["percent"])
+    mark_discount_used(code, msg.from_user.id)
     set_state(msg.from_user.id, step="shop_payment", total_price=new_price,
               plan_key=state["plan_key"], quantity=state["quantity"],
               names=state["names"], original_price=original_price,
@@ -1956,16 +2080,38 @@ def _handle_shop_receipt(msg):
         svc_rows = conn.execute("SELECT * FROM order_services WHERE order_id=?", (order_id,)).fetchall()
     plan = PLANS.get(order["plan_key"], {"label":"---"})
     names_t = "\n".join([f"  {i+1}. {r['service_name']}" for i, r in enumerate(svc_rows)])
+
+    # ── بررسی رسید تکراری با OCR ─────────────────────
+    bot.send_message(msg.chat.id, "🔍 <b>در حال بررسی رسید...</b>")
+    tracking_code = extract_tracking_code_from_receipt(file_id)
+    if tracking_code:
+        duplicate = check_duplicate_receipt(tracking_code)
+        if duplicate:
+            dup_user = duplicate.get("username") or duplicate.get("full_name") or str(duplicate["user_id"])
+            dup_time = duplicate["created_at"][:16]
+            return bot.send_message(msg.chat.id,
+                "⚠️ <b>رسید تکراری شناسایی شد!</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🔢 <b>کد پیگیری:</b> <code>{tracking_code}</code>\n\n"
+                f"⏰ <b>تاریخ ثبت قبلی:</b> {dup_time}\n"
+                f"👤 <b>توسط:</b> {dup_user}\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "❌ این رسید قبلاً ثبت و بررسی شده است.\n"
+                f"📞 اگر مشکلی دارید به @{SUPPORT_USERNAME} پیام دهید."
+            )
+
     adm_kb = types.InlineKeyboardMarkup(row_width=2)
     adm_kb.add(
         types.InlineKeyboardButton("✅ تایید", callback_data=f"adm_ok_{order_id}"),
         types.InlineKeyboardButton("❌ رد",    callback_data=f"adm_rej_{order_id}"),
     )
+    tracking_line = f"\n🔢 <b>کد پیگیری:</b> <code>{tracking_code}</code>" if tracking_code else "\n🔢 <b>کد پیگیری:</b> خوانده نشد"
     adm_msg = bot.send_photo(ADMIN_ID, file_id,
         caption=(
             f"📥 <b>رسید جدید — کارت به کارت</b>\n\n"
             f"👤 @{uname}  |  <code>{msg.from_user.id}</code>\n"
-            f"🕐 {now_str()}\n\n"
+            f"🕐 {now_str()}"
+            f"{tracking_line}\n\n"
             f"📦 {plan['label']}\n🔢 {order['quantity']} سرویس\n🏷️ نام‌ها:\n{names_t}\n\n"
             f"💰 {fmt(order['total_price'])} تومان"
         ), reply_markup=adm_kb
@@ -1974,14 +2120,19 @@ def _handle_shop_receipt(msg):
         conn.execute("INSERT INTO receipts(user_id,order_id,file_id,receipt_type,status,admin_msg_id) VALUES(?,?,?,?,?,?)",
                      (msg.from_user.id, order_id, file_id, "purchase_card", "pending", adm_msg.message_id))
         conn.commit()
+
+    if tracking_code:
+        save_tracking_code(tracking_code, msg.from_user.id, order_id, "purchase_card")
+
     clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id,
-        "📥 <b>رسید دریافت شد!</b> ✅\n\n"
+        "📥 <b>رسید دریافت شد!</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⏳ <b>در حال بررسی رسید شما...</b>\n\n"
+        + (f"🔢 کد پیگیری: <code>{tracking_code}</code>\n\n" if tracking_code else "") +
+        "⏳ سفارش شما در صف بررسی قرار گرفت.\n\n"
         "📌 پس از تایید، کانفیگ در همین چت ارسال می‌شود.\n\n"
-        f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
-        f"❓ سوال؟ @{SUPPORT_USERNAME}"
+        f"⏱️ زمان بررسی: معمولاً کمتر از ۳۰ دقیقه\n\n"
+        f"❓ پیگیری: @{SUPPORT_USERNAME}"
     )
 
 def _handle_crypto_receipt(msg):
@@ -1991,6 +2142,26 @@ def _handle_crypto_receipt(msg):
     total = state.get("total_price", 0); names = state.get("names", [])
     plan = PLANS.get(plan_key, {"label":"---"}); names_t = "\n".join([f"  {i+1}. {n}" for i,n in enumerate(names)])
     trx_amt = toman_to_trx(total); trx_str = f"{trx_amt} TRX" if trx_amt else "---"
+
+    # ── بررسی رسید تکراری با OCR ─────────────────────
+    bot.send_message(msg.chat.id, "🔍 <b>در حال بررسی رسید...</b>")
+    tracking_code = extract_tracking_code_from_receipt(file_id)
+    if tracking_code:
+        duplicate = check_duplicate_receipt(tracking_code)
+        if duplicate:
+            dup_user = duplicate.get("username") or duplicate.get("full_name") or str(duplicate["user_id"])
+            dup_time = duplicate["created_at"][:16]
+            return bot.send_message(msg.chat.id,
+                "⚠️ <b>رسید تکراری شناسایی شد!</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🔢 <b>کد پیگیری:</b> <code>{tracking_code}</code>\n\n"
+                f"⏰ <b>تاریخ ثبت قبلی:</b> {dup_time}\n"
+                f"👤 <b>توسط:</b> {dup_user}\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "❌ این رسید قبلاً ثبت و بررسی شده است.\n"
+                f"📞 اگر مشکلی دارید به @{SUPPORT_USERNAME} پیام دهید."
+            )
+
     with get_db() as conn:
         cur = conn.execute("INSERT INTO orders(user_id,plan_key,quantity,total_price,payment_method,status) VALUES(?,?,?,?,?,?)",
                            (msg.from_user.id, plan_key, qty, total, "crypto", "pending"))
@@ -2003,11 +2174,13 @@ def _handle_crypto_receipt(msg):
         types.InlineKeyboardButton("✅ تایید", callback_data=f"adm_ok_{order_id}"),
         types.InlineKeyboardButton("❌ رد",    callback_data=f"adm_rej_{order_id}"),
     )
+    tracking_line = f"\n🔢 <b>کد پیگیری:</b> <code>{tracking_code}</code>" if tracking_code else "\n🔢 <b>کد پیگیری:</b> خوانده نشد"
     adm_msg = bot.send_photo(ADMIN_ID, file_id,
         caption=(
             f"🔷 <b>رسید جدید — TRX</b>\n\n"
             f"👤 @{uname}  |  <code>{msg.from_user.id}</code>\n"
-            f"🕐 {now_str()}\n\n"
+            f"🕐 {now_str()}"
+            f"{tracking_line}\n\n"
             f"📦 {plan['label']}\n🔢 {qty} سرویس\n🏷️ نام‌ها:\n{names_t}\n\n"
             f"💰 {fmt(total)} تومان\n🔷 {trx_str}"
         ), reply_markup=adm_kb
@@ -2016,14 +2189,19 @@ def _handle_crypto_receipt(msg):
         conn.execute("INSERT INTO receipts(user_id,order_id,file_id,receipt_type,status,admin_msg_id) VALUES(?,?,?,?,?,?)",
                      (msg.from_user.id, order_id, file_id, "purchase_crypto", "pending", adm_msg.message_id))
         conn.commit()
+
+    if tracking_code:
+        save_tracking_code(tracking_code, msg.from_user.id, order_id, "purchase_crypto")
+
     clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id,
-        "📥 <b>رسید TRX دریافت شد!</b> ✅\n\n"
+        "📥 <b>رسید TRX دریافت شد!</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⏳ <b>در حال بررسی تراکنش...</b>\n\n"
+        + (f"🔢 کد پیگیری: <code>{tracking_code}</code>\n\n" if tracking_code else "") +
+        "⏳ سفارش شما در صف بررسی قرار گرفت.\n\n"
         "📌 پس از تایید، کانفیگ ارسال می‌شود.\n\n"
-        f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
-        f"❓ سوال؟ @{SUPPORT_USERNAME}"
+        f"⏱️ زمان بررسی: معمولاً کمتر از ۳۰ دقیقه\n\n"
+        f"❓ پیگیری: @{SUPPORT_USERNAME}"
     )
 
 # ── Surfshark Receipt Handlers ─────────────────────
@@ -2517,6 +2695,12 @@ def _deliver_configs(order_id, configs, subs):
         conn.execute("UPDATE orders SET status='delivered' WHERE id=?", (order_id,))
         conn.execute("UPDATE receipts SET status='approved' WHERE order_id=?", (order_id,))
         conn.commit()
+    # ثبت استفاده از کد تخفیف (اگر این سفارش با کد تخفیف بوده)
+    with get_db() as conn:
+        ord_row = conn.execute("SELECT payment_method FROM orders WHERE id=?", (order_id,)).fetchone()
+    # discount_code رو از order_services نداریم، ولی توی order.payment_method ذخیره نمیشه
+    # پس از جدول orders کد تخفیف رو نمیتونیم بدونیم — جای دیگه ذخیره نشده
+    # این بخش آماده‌ست در صورتی که در آینده کد تخفیف به جدول orders اضافه بشه
 
 # ── Rename ──────────────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rename_"))
@@ -2720,6 +2904,26 @@ def _handle_wallet_receipt(msg):
     state = get_state(msg.from_user.id); amount = state["wallet_amount"]
     file_id = msg.photo[-1].file_id
     u = get_user(msg.from_user.id); uname = u["username"] or u["full_name"] or str(msg.from_user.id)
+
+    # ── بررسی رسید تکراری با OCR ─────────────────────
+    bot.send_message(msg.chat.id, "🔍 <b>در حال بررسی رسید...</b>")
+    tracking_code = extract_tracking_code_from_receipt(file_id)
+    if tracking_code:
+        duplicate = check_duplicate_receipt(tracking_code)
+        if duplicate:
+            dup_user = duplicate.get("username") or duplicate.get("full_name") or str(duplicate["user_id"])
+            dup_time = duplicate["created_at"][:16]
+            return bot.send_message(msg.chat.id,
+                "⚠️ <b>رسید تکراری شناسایی شد!</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🔢 <b>کد پیگیری:</b> <code>{tracking_code}</code>\n\n"
+                f"⏰ <b>تاریخ ثبت قبلی:</b> {dup_time}\n"
+                f"👤 <b>توسط:</b> {dup_user}\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "❌ این رسید قبلاً ثبت و بررسی شده است.\n"
+                f"📞 اگر مشکلی دارید به @{SUPPORT_USERNAME} پیام دهید."
+            )
+
     with get_db() as conn:
         cur = conn.execute("INSERT INTO wallet_requests(user_id,amount,file_id) VALUES(?,?,?)", (msg.from_user.id, amount, file_id))
         req_id = cur.lastrowid; conn.commit()
@@ -2728,23 +2932,30 @@ def _handle_wallet_receipt(msg):
         types.InlineKeyboardButton("✅ تایید شارژ", callback_data=f"wadm_ok_{req_id}_{msg.from_user.id}_{amount}"),
         types.InlineKeyboardButton("❌ رد",          callback_data=f"wadm_rej_{req_id}_{msg.from_user.id}"),
     )
+    tracking_line = f"\n🔢 <b>کد پیگیری:</b> <code>{tracking_code}</code>" if tracking_code else ""
     adm_msg = bot.send_photo(ADMIN_ID, file_id,
         caption=(
             f"💰 <b>درخواست شارژ کیف پول</b>\n\n"
             f"👤 @{uname}  |  <code>{msg.from_user.id}</code>\n"
-            f"🕐 {now_str()}\n\n"
+            f"🕐 {now_str()}"
+            f"{tracking_line}\n\n"
             f"💰 {fmt(amount)} تومان"
         ),
         reply_markup=kb
     )
     with get_db() as conn:
         conn.execute("UPDATE wallet_requests SET admin_msg_id=? WHERE id=?", (adm_msg.message_id, req_id)); conn.commit()
+
+    if tracking_code:
+        save_tracking_code(tracking_code, msg.from_user.id, req_id, "wallet_charge")
+
     clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id,
-        "📥 <b>رسید دریافت شد!</b> ✅\n\n"
+        "📥 <b>رسید دریافت شد!</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⏳ منتظر تایید ادمین باشید.\n\n"
-        f"⏱️ زمان بررسی: کمتر از ۳۰ دقیقه\n\n"
+        + (f"🔢 کد پیگیری: <code>{tracking_code}</code>\n\n" if tracking_code else "") +
+        "⏳ سفارش شما در صف بررسی قرار گرفت.\n\n"
+        f"⏱️ زمان بررسی: معمولاً کمتر از ۳۰ دقیقه\n\n"
         f"❓ پیگیری: @{SUPPORT_USERNAME}"
     )
 
@@ -4365,17 +4576,37 @@ def fallback(msg):
                 if percent < 1 or percent > 100: raise ValueError
             except ValueError:
                 return bot.send_message(msg.chat.id, "⚠️ عدد بین ۱ تا ۱۰۰ وارد کنید.")
+            set_state(msg.from_user.id, step="adm_discount_maxuses",
+                      discount_code=state.get("discount_code",""), discount_percent=percent)
+            return bot.send_message(msg.chat.id,
+                f"✅ درصد تخفیف: <b>{percent}٪</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "این کد برای چند نفر باشد؟\n\n"
+                "<i>عدد وارد کنید (مثلاً ۱۰۰)\n"
+                "برای نامحدود، عدد ۰ وارد کنید</i>"
+            )
+
+        if step == "adm_discount_maxuses":
+            try:
+                max_uses = int((msg.text or "").strip())
+                if max_uses < 0: raise ValueError
+            except ValueError:
+                return bot.send_message(msg.chat.id, "⚠️ یک عدد معتبر وارد کنید (۰ برای نامحدود).")
             code = state.get("discount_code", "")
+            percent = state.get("discount_percent", 0)
             with get_db() as conn:
                 try:
-                    conn.execute("INSERT INTO discount_codes(code, percent) VALUES(?,?)", (code, percent))
+                    conn.execute("INSERT INTO discount_codes(code, percent, max_uses) VALUES(?,?,?)",
+                                 (code, percent, max_uses))
                     conn.commit()
                     clear_state(msg.from_user.id)
+                    limit_txt = f"{max_uses} نفر" if max_uses > 0 else "نامحدود"
                     return bot.send_message(msg.chat.id,
                         f"✅ <b>کد تخفیف ساخته شد!</b>\n\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                         f"🏷️ <b>کد:</b> <code>{code}</code>\n"
-                        f"💰 <b>تخفیف:</b> {percent}٪\n\n"
+                        f"💰 <b>تخفیف:</b> {percent}٪\n"
+                        f"👥 <b>محدودیت استفاده:</b> {limit_txt}\n\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                         "این کد را به مشتریان بدهید."
                     )
@@ -4412,7 +4643,15 @@ def fallback(msg):
     if step == "surf_discount_wait":
         code = (msg.text or "").strip().upper()
         original_total = state.get("surf_original_price", state.get("surf_total", SURFSHARK_1YEAR_PRICE))
-        disc = get_discount(code)
+        disc = get_discount(code, user_id=msg.from_user.id)
+        if disc == "already_used":
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="surf_no_discount"))
+            return bot.send_message(msg.chat.id,
+                "❌ <b>شما قبلاً از این کد تخفیف استفاده کرده‌اید!</b>\n\n"
+                "کد دیگری وارد کنید یا دکمه زیر را بزنید:",
+                reply_markup=kb
+            )
         if not disc:
             kb = types.InlineKeyboardMarkup()
             kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="surf_no_discount"))
@@ -4422,6 +4661,7 @@ def fallback(msg):
                 reply_markup=kb
             )
         new_price = apply_discount(original_total, disc["percent"])
+        mark_discount_used(code, msg.from_user.id)
         set_state(msg.from_user.id, step="surfshark_payment",
                   surf_total=new_price, surf_original_price=original_total,
                   surf_order_type="1year")
@@ -4439,7 +4679,15 @@ def fallback(msg):
     if step == "shop_discount_wait":
         code = (msg.text or "").strip().upper()
         original_price = state.get("original_price", state.get("total_price", 0))
-        disc = get_discount(code)
+        disc = get_discount(code, user_id=msg.from_user.id)
+        if disc == "already_used":
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="pay_no_discount"))
+            return bot.send_message(msg.chat.id,
+                "❌ <b>شما قبلاً از این کد تخفیف استفاده کرده‌اید!</b>\n\n"
+                "کد دیگری وارد کنید یا دکمه زیر را بزنید:",
+                reply_markup=kb
+            )
         if not disc:
             kb = types.InlineKeyboardMarkup()
             kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="pay_no_discount"))
@@ -4449,6 +4697,7 @@ def fallback(msg):
                 reply_markup=kb
             )
         new_price = apply_discount(original_price, disc["percent"])
+        mark_discount_used(code, msg.from_user.id)
         set_state(msg.from_user.id, step="shop_payment", total_price=new_price,
                   plan_key=state["plan_key"], quantity=state["quantity"],
                   names=state["names"], original_price=original_price,
@@ -5201,14 +5450,44 @@ def _send_winback_messages():
 # ─────────────────────────────────────────────
 #  کدهای تخفیف
 # ─────────────────────────────────────────────
-def get_discount(code):
+def get_discount(code, user_id=None):
     if not code:
         return None
     with get_db() as conn:
-        return conn.execute(
+        d = conn.execute(
             "SELECT * FROM discount_codes WHERE code=? AND active=1",
             (code.strip().upper(),)
         ).fetchone()
+        if not d:
+            return None
+        # چک محدودیت تعداد کل استفاده
+        if d["max_uses"] and d["max_uses"] > 0 and d["used_count"] >= d["max_uses"]:
+            return None
+        # چک استفاده قبلی کاربر
+        if user_id:
+            already = conn.execute(
+                "SELECT 1 FROM discount_code_used WHERE code=? AND user_id=?",
+                (d["code"], user_id)
+            ).fetchone()
+            if already:
+                return "already_used"
+        return d
+
+def mark_discount_used(code, user_id):
+    """ثبت استفاده از کد تخفیف توسط کاربر"""
+    with get_db() as conn:
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO discount_code_used(code, user_id) VALUES(?,?)",
+                (code.strip().upper(), user_id)
+            )
+            conn.execute(
+                "UPDATE discount_codes SET used_count=used_count+1 WHERE code=?",
+                (code.strip().upper(),)
+            )
+            conn.commit()
+        except Exception:
+            pass
 
 def apply_discount(price, percent):
     return int(price * (100 - percent) / 100)
@@ -5222,8 +5501,11 @@ def cb_ap_discount_codes(call):
     kb.add(types.InlineKeyboardButton("➕ ساخت کد تخفیف", callback_data="ap_create_discount"))
     for c in codes:
         status = "✅" if c["active"] else "❌"
+        used = c["used_count"] if c["used_count"] else 0
+        max_u = c["max_uses"] if c["max_uses"] else 0
+        limit_txt = f"{used}/{max_u}" if max_u > 0 else f"{used}/∞"
         kb.add(types.InlineKeyboardButton(
-            f"{status} {c['code']} — {c['percent']}٪",
+            f"{status} {c['code']} — {c['percent']}٪ ({limit_txt})",
             callback_data=f"ap_disc_{c['id']}"
         ))
     kb.add(types.InlineKeyboardButton("🔙 پنل ادمین", callback_data="menu_admin"))
@@ -5257,6 +5539,9 @@ def cb_ap_disc_view(call):
     if not d:
         return
     status = "✅ فعال" if d["active"] else "❌ غیرفعال"
+    used = d["used_count"] if d["used_count"] else 0
+    max_u = d["max_uses"] if d["max_uses"] else 0
+    limit_txt = f"{used} از {max_u} نفر" if max_u > 0 else f"{used} نفر (نامحدود)"
     kb = types.InlineKeyboardMarkup(row_width=1)
     toggle_lbl = "❌ غیرفعال کردن" if d["active"] else "✅ فعال کردن"
     kb.add(types.InlineKeyboardButton(toggle_lbl, callback_data=f"ap_disc_tog_{disc_id}"))
@@ -5266,6 +5551,7 @@ def cb_ap_disc_view(call):
         f"🏷️ <b>کد تخفیف</b>\n\n"
         f"کد: <code>{d['code']}</code>\n"
         f"تخفیف: <b>{d['percent']}٪</b>\n"
+        f"استفاده: <b>{limit_txt}</b>\n"
         f"وضعیت: {status}\n"
         f"ساخته شده: {d['created_at'][:16]}",
         reply_markup=kb
