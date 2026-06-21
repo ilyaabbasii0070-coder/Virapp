@@ -5891,11 +5891,19 @@ def _build_sb_ai_system(uid):
     wallet = get_wallet(uid)
     plans_text = "\n".join([f"- {p['label']}: {fmt(p['price'])} تومان" for p in PLANS.values()])
     return (
-        "تو پشتیبان هوشمند ربات ViraNet VPN هستی که در ربات پشتیبانی جداگانه کار می‌کنی.\n"
+        "تو پشتیبان حرفه‌ای و هوشمند ربات ViraNet VPN هستی.\n"
+        "وظیفه‌ات اینه که مشتری رو کامل راهنمایی کنی، سوال‌هاشو جواب بدی و کمکش کنی خرید کنه.\n\n"
         f"موجودی کیف پول کاربر: {fmt(wallet)} تومان\n"
         f"پلن‌های موجود:\n{plans_text}\n\n"
-        "اگر کاربر خرید می‌خواهد، بگو از دکمه 🛒 فروشگاه استفاده کند.\n"
-        "پاسخ‌ها را فارسی و کوتاه بده."
+        "قوانین مهم:\n"
+        "- همیشه فارسی و صمیمی جواب بده\n"
+        "- جواب‌ها کامل و مفید باشن، نه خیلی کوتاه\n"
+        "- اگه مشتری خرید می‌خواد، بگو بنویسه 'خرید' تا بریم مراحل خرید\n"
+        "- اگه مشتری مشکل اتصال داره، کامل راهنمایی کن\n"
+        "- اگه نیاز به ادمین بود، بگو @ViraNet0 رو پیام بده\n"
+        "- هرگز نگو 'نمی‌دونم' — همیشه یه راه‌حل یا راهنمایی بده\n"
+        "- اگه مشتری گفت 'خرید' یا درخواست خرید کرد، بنویس: 'برای خرید عبارت /buy رو بفرست'\n"
+        "- درباره VPN، v2ray، کانفیگ، و مشکلات اتصال اطلاعات کامل داری\n"
     )
 
 def _launch_support_bot(support_token):
@@ -5916,24 +5924,16 @@ def _launch_support_bot(support_token):
             @sbot.message_handler(commands=["start"])
             def sb_start(msg):
                 ensure_user(msg.from_user)
-                _sb_clear(msg.from_user.id)
+                uid = msg.from_user.id
                 name = (msg.from_user.first_name or "دوست عزیز")
-                kb = types.InlineKeyboardMarkup(row_width=1)
-                kb.add(types.InlineKeyboardButton("🛒 خرید سرویس",          callback_data="sb_shop"))
-                kb.add(types.InlineKeyboardButton("💬 سوال دارم (چت هوشمند)", callback_data="sb_chat"))
-                kb.add(types.InlineKeyboardButton("💰 موجودی کیف پول",       callback_data="sb_wallet"))
+                _sb_set(uid, step="sb_chatting", history=[])
                 sbot.send_message(
                     msg.chat.id,
                     f"👋 سلام <b>{name}</b> عزیز!\n\n"
                     "🤖 <b>پشتیبانی هوشمند ViraNet</b>\n\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     "چطور می‌تونم کمکتون کنم؟ 😊\n\n"
-                    "🔹 <b>خرید سرویس VPN</b> — خرید مستقیم از اینجا\n"
-                    "🔹 <b>سوال دارم</b> — هرچی بخوای بپرس\n"
-                    "🔹 <b>کیف پول</b> — موجودیتو ببین\n\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "👇 یکی رو انتخاب کن:",
-                    reply_markup=kb
+                    "هر سوالی داری بپرس — برای خرید سرویس هم بنویس <b>خرید</b>"
                 )
 
             @sbot.callback_query_handler(func=lambda c: c.data == "sb_wallet")
@@ -6301,36 +6301,59 @@ def _launch_support_bot(support_token):
                     f"❓ پیگیری: @{SUPPORT_USERNAME}"
                 )
 
+            @sbot.message_handler(commands=["buy"])
+            def sb_buy_cmd(msg):
+                ensure_user(msg.from_user)
+                _sb_clear(msg.from_user.id)
+                reload_plans()
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                if V2RAY_ENABLED and PLANS:
+                    kb.add(types.InlineKeyboardButton("🔵 V2Ray (کانفیگ VPN)", callback_data="sb_v2ray"))
+                if SURFSHARK_ENABLED:
+                    kb.add(types.InlineKeyboardButton(f"🦈 Surfshark یه ساله — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
+                sbot.send_message(
+                    msg.chat.id,
+                    "🛒 <b>فروشگاه ViraNet</b>\n\nچه سرویسی می‌خوای؟ 👇",
+                    reply_markup=kb
+                )
+
             @sbot.callback_query_handler(func=lambda c: c.data == "sb_chat")
             def sb_chat_start(call):
                 sbot.answer_callback_query(call.id)
-                _sb_set(call.from_user.id, step="sb_chatting", history=[])
+                uid = call.from_user.id
+                _sb_set(uid, step="sb_chatting", history=[])
                 sbot.send_message(
                     call.message.chat.id,
                     "💬 <b>پشتیبانی هوشمند</b>\n\n"
-                    "سوالت رو بنویس، راهنماییت می‌کنم 🤖\n\n"
-                    "برای پایان /end بنویس."
+                    "سوالت رو بنویس، کامل راهنماییت می‌کنم 🤖\n\n"
+                    "برای خرید بنویس: <b>خرید</b>"
                 )
 
             @sbot.message_handler(func=lambda m: _sb_get(m.from_user.id).get("step") == "sb_chatting")
             def sb_chatting(msg):
                 uid  = msg.from_user.id
                 text = (msg.text or "").strip()
-                if text == "/end":
+                # اگه خواست خرید کنه
+                if any(w in text.lower() for w in ["خرید", "بخرم", "میخوام بخرم", "سرویس بده", "vpn بده", "وی پی ان"]):
                     _sb_clear(uid)
-                    kb = types.InlineKeyboardMarkup()
-                    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="sb_back"))
-                    return sbot.send_message(msg.chat.id, "✅ گفتگو پایان یافت.", reply_markup=kb)
+                    reload_plans()
+                    kb = types.InlineKeyboardMarkup(row_width=1)
+                    if V2RAY_ENABLED and PLANS:
+                        kb.add(types.InlineKeyboardButton("🔵 V2Ray (کانفیگ VPN)", callback_data="sb_v2ray"))
+                    if SURFSHARK_ENABLED:
+                        kb.add(types.InlineKeyboardButton(f"🦈 Surfshark یه ساله — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
+                    return sbot.send_message(
+                        msg.chat.id,
+                        "🛒 <b>فروشگاه ViraNet</b>\n\nچه سرویسی می‌خوای؟ 👇",
+                        reply_markup=kb
+                    )
                 history = _sb_get(uid).get("history", [])
                 history.append({"role": "user", "content": text})
                 full_msgs = [{"role": "system", "content": _build_sb_ai_system(uid)}] + history[-10:]
                 reply = ai_chat(full_msgs)
                 history.append({"role": "assistant", "content": reply})
                 _sb_set(uid, history=history)
-                kb = types.InlineKeyboardMarkup(row_width=1)
-                kb.add(types.InlineKeyboardButton("🛒 فروشگاه", callback_data="sb_shop"))
-                kb.add(types.InlineKeyboardButton("🔚 پایان",   callback_data="sb_end"))
-                sbot.send_message(msg.chat.id, reply, reply_markup=kb)
+                sbot.send_message(msg.chat.id, reply)
 
             @sbot.callback_query_handler(func=lambda c: c.data == "sb_end")
             def sb_end(call):
@@ -6356,10 +6379,30 @@ def _launch_support_bot(support_token):
 
             @sbot.message_handler(func=lambda m: True, content_types=["text", "photo", "document"])
             def sb_fallback(msg):
-                kb = types.InlineKeyboardMarkup(row_width=1)
-                kb.add(types.InlineKeyboardButton("🛒 فروشگاه",         callback_data="sb_shop"))
-                kb.add(types.InlineKeyboardButton("💬 پشتیبانی هوشمند", callback_data="sb_chat"))
-                sbot.send_message(msg.chat.id, "👋 از منوی زیر انتخاب کن:", reply_markup=kb)
+                uid = msg.from_user.id
+                ensure_user(msg.from_user)
+                text = (msg.text or "").strip()
+                if not text:
+                    return
+                # اگه خواست خرید کنه
+                if any(w in text.lower() for w in ["خرید", "بخرم", "میخوام بخرم", "سرویس بده", "vpn بده", "وی پی ان"]):
+                    reload_plans()
+                    kb = types.InlineKeyboardMarkup(row_width=1)
+                    if V2RAY_ENABLED and PLANS:
+                        kb.add(types.InlineKeyboardButton("🔵 V2Ray (کانفیگ VPN)", callback_data="sb_v2ray"))
+                    if SURFSHARK_ENABLED:
+                        kb.add(types.InlineKeyboardButton(f"🦈 Surfshark یه ساله — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
+                    return sbot.send_message(
+                        msg.chat.id,
+                        "🛒 <b>فروشگاه ViraNet</b>\n\nچه سرویسی می‌خوای؟ 👇",
+                        reply_markup=kb
+                    )
+                # مستقیم AI جواب بده و وارد حالت چت بشه
+                _sb_set(uid, step="sb_chatting", history=[{"role": "user", "content": text}])
+                full_msgs = [{"role": "system", "content": _build_sb_ai_system(uid)}] + [{"role": "user", "content": text}]
+                reply = ai_chat(full_msgs)
+                _sb_get(uid)["history"].append({"role": "assistant", "content": reply})
+                sbot.send_message(msg.chat.id, reply)
 
             print(f"[support_bot] ✅ راه‌اندازی شد: @{SUPPORT_BOT_USERNAME}")
             sbot.infinity_polling(timeout=40, long_polling_timeout=20)
