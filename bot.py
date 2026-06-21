@@ -524,12 +524,17 @@ def ai_chat(messages: list) -> str:
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         model   = "llama-3.3-70b-versatile"
     else:
-        return "⚙️ برای استفاده از هوش مصنوعی، متغیر OPENAI_API_KEY یا GROQ_API_KEY را در Railway تنظیم کنید."
+        return "متأسفم، در حال حاضر پشتیبانی هوشمند در دسترس نیست.\nلطفاً مستقیم با پشتیبانی تماس بگیرید 👇"
     try:
         r = requests.post(url, headers=headers, json={"model": model, "messages": messages, "max_tokens": 2000}, timeout=30)
-        return r.json()["choices"][0]["message"]["content"]
+        data = r.json()
+        if "choices" not in data:
+            print(f"[ai_chat] unexpected response: {data}")
+            return "متأسفم، خطایی پیش آمد. لطفاً دوباره امتحان کنید یا با پشتیبانی تماس بگیرید."
+        return data["choices"][0]["message"]["content"]
     except Exception as e:
-        return f"❌ خطا در ارتباط با هوش مصنوعی: {e}"
+        print(f"[ai_chat] {e}")
+        return "متأسفم، ارتباط با سرور قطع شد. لطفاً دوباره امتحان کنید."
 
 AI_SYSTEM = (
     "تو یک توسعه‌دهنده ارشد ربات تلگرام هستی که با Python و pyTelegramBotAPI کار می‌کنی. "
@@ -821,16 +826,11 @@ def cmd_start(msg):
         ch_count = len(channels)
         return bot.send_message(
             msg.chat.id,
-            "👋 <b>به ویرا نت خوش آمدید!</b>\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "🔒 <b>برای استفاده از ربات، ابتدا باید در</b> "
-            f"<b>{ch_count} کانال</b> زیر عضو شوید:\n\n"
-            "📌 مراحل:\n"
-            f"   1️⃣  روی {'دکمه کانال' if ch_count == 1 else 'دکمه‌های کانال'} زیر بزنید\n"
-            "   2️⃣  عضو کانال شوید\n"
-            "   3️⃣  دکمه ✅ <b>عضو شدم</b> را بزنید\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "💎 بعد از عضویت، به تمام امکانات ربات دسترسی خواهید داشت.",
+            "👋 <b>به ویرا نت خوش اومدی!</b>\n\n"
+            f"قبل از شروع، باید توی {'کانال' if ch_count == 1 else f'{ch_count} کانال'} زیر عضو بشی:\n\n"
+            f"   1️⃣  روی {'دکمه کانال' if ch_count == 1 else 'دکمه‌های کانال'} زیر بزن\n"
+            "   2️⃣  عضو بشو\n"
+            "   3️⃣  دکمه ✅ عضو شدم رو بزن",
             reply_markup=join_required_markup()
         )
     args = msg.text.split()
@@ -851,15 +851,10 @@ def cmd_start(msg):
             )
         except Exception: pass
     bot.send_message(msg.chat.id,
-        "✨ <b>به ویرا نت خوش آمدید!</b> 🎉\n\n"
-        "💎 <b>فروشگاه سرویس‌های اینترنتی پرسرعت و امن</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⚡ <b>سرعت بالا</b> بدون محدودیت\n"
-        "🛡️ <b>امنیت کامل</b> با رمزنگاری پیشرفته\n"
-        "🔧 <b>پشتیبانی ۲۴/۷</b> در هر ساعت از شبانه‌روز\n"
-        "🚀 <b>فعال‌سازی فوری</b> بعد از تایید پرداخت\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👇 از منوی زیر انتخاب کنید:",
+        f"سلام {'کاربر جدید! 🎉' if is_new else '👋'}\n\n"
+        "به <b>ویرا نت</b> خوش اومدی.\n"
+        "اینجا می‌تونی سرویس VPN سریع و امن بگیری.\n\n"
+        "از منوی زیر شروع کن 👇",
         reply_markup=main_menu_kb(msg.from_user.id)
     )
 
@@ -1450,12 +1445,7 @@ def _show_shop(chat_id, user_id):
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
     bot.send_message(chat_id,
         "🛒 <b>فروشگاه ویرا نت</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "✅ فعال‌سازی فوری\n"
-        "✅ سرعت نامحدود\n"
-        "✅ پشتیبانی ۲۴ ساعته\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👇 نوع سرویس مورد نظر را انتخاب کنید:",
+        "چه سرویسی می‌خوای؟ 👇",
         reply_markup=kb
     )
 
@@ -1485,13 +1475,8 @@ def _show_v2ray_plans(chat_id, user_id):
         kb.add(types.InlineKeyboardButton("🌐 خرید از پنل کاربری", web_app=types.WebAppInfo(url=WEBAPP_URL + "/panel")))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="menu_shop"))
     bot.send_message(chat_id,
-        "🔵 <b>V2Ray — پلن‌های اینترنت</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "✅ فعال‌سازی فوری\n"
-        "✅ سرعت نامحدود\n"
-        "✅ پشتیبانی ۲۴ ساعته\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👇 پلن مورد نظر را انتخاب کنید:",
+        "🔵 <b>V2Ray — پلن‌ها</b>\n\n"
+        "پلن مورد نظرت رو انتخاب کن 👇",
         reply_markup=kb
     )
 
@@ -1513,13 +1498,8 @@ def _show_surfshark_plans(chat_id, user_id):
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="menu_shop"))
     bot.send_message(chat_id,
         "🦈 <b>Surfshark VPN</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "✅ دسترسی نامحدود\n"
-        "✅ تمام کشورها\n"
-        "✅ چند دستگاه همزمان\n"
-        "✅ بدون محدودیت ترافیک\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👇 پلن مورد نظر را انتخاب کنید:",
+        "نامحدود — همه کشورها — چند دستگاه همزمان\n\n"
+        "👇 پلن رو انتخاب کن:",
         reply_markup=kb
     )
 
@@ -4467,15 +4447,13 @@ def cb_smart_support(call):
     kb.add(types.InlineKeyboardButton("💬 شروع گفتگو", callback_data="support_start_chat"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
     bot.send_message(call.message.chat.id,
-        "🤖 <b>پشتیبانی هوشمند ViraNet</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "با هوش مصنوعی سوال بپرسید:\n"
-        "   🔹 مشکل اتصال\n"
-        "   🔹 دانلود برنامه\n"
-        "   🔹 سوال درباره سرویس\n"
-        "   🔹 خرید و پرداخت\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "برای پایان گفتگو <code>/end</code> بنویسید.",
+        "🤖 <b>پشتیبانی هوشمند</b>\n\n"
+        "سوالت رو بپرس، سریع جواب می‌گیری.\n\n"
+        "🔹 مشکل اتصال\n"
+        "🔹 دانلود برنامه\n"
+        "🔹 سوال درباره سرویس\n"
+        "🔹 خرید و پرداخت\n\n"
+        "برای پایان <code>/end</code> بنویس.",
         reply_markup=kb
     )
 
@@ -4486,9 +4464,8 @@ def cb_support_start_chat(call):
     _support_chats[uid] = []
     set_state(uid, step="smart_support")
     bot.send_message(call.message.chat.id,
-        "💬 <b>گفتگو شروع شد!</b>\n\n"
-        "سوال خود را بنویسید.\n"
-        "برای پایان <code>/end</code> بنویسید.",
+        "💬 بفرما، سوالت رو بنویس.\n"
+        "برای پایان <code>/end</code> بنویس.",
     )
 
 @bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "smart_support")
