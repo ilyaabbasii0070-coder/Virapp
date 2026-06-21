@@ -4415,47 +4415,148 @@ def cb_pending_view_item(call):
             bot.send_message(call.message.chat.id, caption, reply_markup=kb)
 
 # ─────────────────────────────────────────────
-#  🤖 SMART SUPPORT
+#  🤖 SMART SUPPORT (نسخه پیشرفته)
 # ─────────────────────────────────────────────
+
+BUY_KEYWORDS = [
+    "خرید", "بخرم", "می‌خوام بگیرم", "می‌خوام بخرم",
+    "خریداری", "سفارش", "خریدن", "بگیرم", "بخوام بخرم",
+    "اکانت می‌خوام", "سرویس می‌خوام", "surfshark می‌خوام",
+    "سورف شارک می‌خوام", "وی پی ان می‌خوام", "vpn می‌خوام",
+    "ازت بخرم", "همینجا بخرم", "از ربات بخرم",
+]
+
+ADMIN_CONTACT_KEYWORDS = [
+    "ادمین", "پشتیبان", "آیدی پشتیبان", "آیدی ادمین",
+    "چطور باهات ارتباط", "چطور تماس", "راه ارتباط",
+    "آیدیت", "آیدی تو",
+]
+
+SERVICE_STATUS_KEYWORDS = [
+    "سرویسم", "سرویس من", "حجم", "چقدر مونده",
+    "اعتبار", "موجودی سرویس", "وضعیت سرویس", "چک کنم",
+    "ببینم مونده", "سرویس‌هام", "سرویس هام", "باقی‌مانده",
+]
+
+RECEIPT_KEYWORDS = [
+    "تایید نشد", "رد شد", "رسیدم", "فیشم",
+    "پرداخت تایید نشده", "شارژ نشد", "پول کم نشد",
+]
+
+
 def _support_ai_system():
-    ios  = f"لینک دانلود iOS: {APP_LINK_IOS}" if APP_LINK_IOS else "لینک iOS: هنوز تنظیم نشده"
-    andr = f"لینک دانلود اندروید: {APP_LINK_ANDROID}" if APP_LINK_ANDROID else "لینک اندروید: هنوز تنظیم نشده"
-    return (
-        "تو پشتیبانی هوشمند ربات ViraNet VPN هستی. "
-        "با احترام و مختصر به سوالات کاربران پاسخ می‌دهی. "
-        "اطلاعات مفید:\n"
-        f"  {ios}\n"
-        f"  {andr}\n"
-        "اگر کاربر پرسید از کجا برنامه دانلود کند، لینک‌های بالا را بده.\n"
-        "اگر مشکل اتصال داشت: بگو برنامه را ری‌استارت کند، کانفیگ را دوباره وارد کند.\n"
-        "اگر گفت رسیدش تایید نشده: بگو صبر کنند، مشکل تکنیکی باشد با ادمین در میان بگذارند.\n"
-        "اگر سوال درباره قیمت پرسید: بگو از فروشگاه ربات پلن‌ها را ببینند.\n"
-        "اگر نمی‌دانی: بگو «لطفاً مستقیم با پشتیبانی تماس بگیرید.»\n"
-        "پاسخ‌ها را کوتاه، مفید و فارسی بنویس. از ایموجی استفاده کن."
-    )
+    ios_line  = f"لینک دانلود iOS: {APP_LINK_IOS}"        if APP_LINK_IOS    else "لینک iOS: هنوز تنظیم نشده"
+    andr_line = f"لینک دانلود Android: {APP_LINK_ANDROID}" if APP_LINK_ANDROID else "لینک اندروید: هنوز تنظیم نشده"
+    plans_text = "\n".join([
+        f"  - {v['label']} — {v['price']:,} تومان"
+        for v in PLANS.values()
+    ]) or "  (پلنی تنظیم نشده)"
+
+    return f"""تو پشتیبانی هوشمند ربات ViraNet VPN هستی.
+وظیفه‌ات اینه که مشتری رو صفر تا صد راهنمایی کنی — دقیقاً مثل یک پشتیبان انسانی.
+
+━━━━━━━━━━━━━━━━━━
+📌 اطلاعات مهم:
+━━━━━━━━━━━━━━━━━━
+آیدی پشتیبان/ادمین برای تماس مستقیم: @{SUPPORT_USERNAME}
+{ios_line}
+{andr_line}
+
+پلن‌های موجود (v2ray):
+{plans_text}
+
+پلن Surfshark: یه ساله نامحدود — {SURFSHARK_1YEAR_PRICE:,} تومان
+
+━━━━━━━━━━━━━━━━━━
+🛒 راهنمای خرید v2ray (گام‌به‌گام):
+━━━━━━━━━━━━━━━━━━
+1️⃣ روی دکمه «🔵 🛒 فروشگاه» در منوی اصلی بزن
+2️⃣ یک پلن انتخاب کن
+3️⃣ تعداد سرویس بنویس (مثلاً: 1)
+4️⃣ اسم سرویس انتخاب کن (رندم یا دلخواه)
+5️⃣ روش پرداخت انتخاب کن:
+   - «💰 کیف پول» اگه موجودی داری
+   - «💳 کارت به کارت» برای پرداخت مستقیم
+   - «🔷 ترون (TRX)» اگه ارز دیجیتال داری
+6️⃣ اگه کارت به کارت: کد تخفیف وارد کن (اگه داری) یا «کد ندارم» بزن
+7️⃣ مبلغ رو به شماره کارت اعلام شده واریز کن
+8️⃣ عکس رسید رو همونجا توی ربات بفرست
+9️⃣ بعد از تایید، کانفیگ یا اکانت برات ارسال میشه
+
+━━━━━━━━━━━━━━━━━━
+🦈 راهنمای خرید Surfshark:
+━━━━━━━━━━━━━━━━━━
+1️⃣ «🔵 🛒 فروشگاه» → «🦈 Surfshark یه ساله» رو بزن
+2️⃣ روش پرداخت انتخاب کن
+3️⃣ کد تخفیف وارد کن یا «کد ندارم» بزن
+4️⃣ مبلغ واریز کن، عکس رسید بفرست
+5️⃣ وارد برنامه Surfshark بشو → Login → «Log in with another device» → اسکرین‌شات از QR بگیر و بفرست
+6️⃣ بعد از تایید، پیام فعال‌سازی میاد
+
+━━━━━━━━━━━━━━━━━━
+📦 راهنمای مشاهده سرویس:
+━━━━━━━━━━━━━━━━━━
+منوی اصلی → «🟢 📦 سرویس‌های من» → روی سرویس بزن → حجم، روزهای مونده، کانفیگ و ساب‌لینک رو ببین
+
+━━━━━━━━━━━━━━━━━━
+📲 راهنمای اتصال بعد از خرید v2ray:
+━━━━━━━━━━━━━━━━━━
+1️⃣ برنامه V2Ray یا Clash نصب کن
+2️⃣ کانفیگ یا ساب‌لینک رو که ربات فرستاده کپی کن
+3️⃣ داخل برنامه، Import یا Add from clipboard بزن
+4️⃣ وصل کن
+
+━━━━━━━━━━━━━━━━━━
+⚙️ قوانین پاسخ‌دهی:
+━━━━━━━━━━━━━━━━━━
+- همیشه فارسی پاسخ بده
+- پاسخ‌ها کوتاه، شفاف و گام‌به‌گام
+- از ایموجی استفاده کن
+- اگه کاربر آیدی ادمین خواست → دقیقاً @{SUPPORT_USERNAME} رو بفرست
+- اگه سوالی هست که جواب نمی‌دونی → بگو «لطفاً مستقیم با @{SUPPORT_USERNAME} تماس بگیرید»"""
+
 
 _support_chats: dict = {}  # user_id → [{"role":..,"content":..}]
 
-RECEIPT_KEYWORDS = ["تایید نشد", "رد شد", "رسیدم", "فیشم", "پرداخت تایید نشده", "شارژ نشد", "پول کم نشد"]
+
+def _detect_intent(text: str) -> str:
+    t = text.lower()
+    if any(kw in t for kw in BUY_KEYWORDS):
+        return "buy"
+    if any(kw in t for kw in ADMIN_CONTACT_KEYWORDS):
+        return "admin_contact"
+    if any(kw in t for kw in SERVICE_STATUS_KEYWORDS):
+        return "service_status"
+    if any(kw in t for kw in RECEIPT_KEYWORDS):
+        return "receipt_complaint"
+    return "general"
+
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_smart_support")
 def cb_smart_support(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     _support_chats[uid] = []
+    safe_delete(call.message.chat.id, call.message.message_id)
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("💬 شروع گفتگو", callback_data="support_start_chat"))
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
+    kb.add(types.InlineKeyboardButton("💬 شروع گفتگو",                          callback_data="support_start_chat"))
+    kb.add(types.InlineKeyboardButton("🛒 رفتن به فروشگاه",                     callback_data="menu_shop"))
+    kb.add(types.InlineKeyboardButton("📦 سرویس‌های من",                        callback_data="menu_services"))
+    kb.add(types.InlineKeyboardButton(f"📞 تماس با ادمین — @{SUPPORT_USERNAME}", url=f"https://t.me/{SUPPORT_USERNAME}"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت",                              callback_data="back_main"))
     bot.send_message(call.message.chat.id,
-        "🤖 <b>پشتیبانی هوشمند</b>\n\n"
-        "سوالت رو بپرس، سریع جواب می‌گیری.\n\n"
-        "🔹 مشکل اتصال\n"
-        "🔹 دانلود برنامه\n"
-        "🔹 سوال درباره سرویس\n"
-        "🔹 خرید و پرداخت\n\n"
-        "برای پایان <code>/end</code> بنویس.",
+        "🤖 <b>پشتیبانی هوشمند ViraNet</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "سوالت رو بپرس، گام‌به‌گام راهنماییت می‌کنم 👇\n\n"
+        "🔹 مشکل اتصال یا نصب برنامه\n"
+        "🔹 راهنمای خرید از صفر تا آخر\n"
+        "🔹 وضعیت سرویس و حجم باقی‌مانده\n"
+        "🔹 سوال درباره پرداخت و رسید\n\n"
+        "برای پایان <code>/end</code> بنویس.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         reply_markup=kb
     )
+
 
 @bot.callback_query_handler(func=lambda c: c.data == "support_start_chat")
 def cb_support_start_chat(call):
@@ -4464,22 +4565,28 @@ def cb_support_start_chat(call):
     _support_chats[uid] = []
     set_state(uid, step="smart_support")
     bot.send_message(call.message.chat.id,
-        "💬 بفرما، سوالت رو بنویس.\n"
-        "برای پایان <code>/end</code> بنویس.",
+        "💬 <b>پشتیبانی هوشمند — حالت گفتگو</b>\n\n"
+        "سوالت رو بنویس، کامل راهنماییت می‌کنم 🤖\n\n"
+        "برای پایان <code>/end</code> بنویس."
     )
+
 
 @bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "smart_support")
 def smart_support_chat(msg):
     uid = msg.from_user.id
     text = (msg.text or "").strip()
+
     if text == "/end":
         clear_state(uid)
         _support_chats.pop(uid, None)
         return send_main_menu(msg.chat.id, uid, "✅ گفتگو پایان یافت. به منوی اصلی بازگشتید.")
-    # Detect receipt complaint → notify admin
-    if any(kw in text for kw in RECEIPT_KEYWORDS):
+
+    intent = _detect_intent(text)
+
+    # ── شکایت از رسید → اطلاع به ادمین ──────────
+    if intent == "receipt_complaint":
         u = get_user(uid)
-        uname = u["username"] or u["full_name"] if u else str(uid)
+        uname = (u["username"] or u["full_name"]) if u else str(uid)
         try:
             bot.send_message(ADMIN_ID,
                 f"⚠️ <b>کاربر از تایید نشدن رسید شکایت دارد</b>\n\n"
@@ -4487,19 +4594,56 @@ def smart_support_chat(msg):
                 f"💬 پیام: {html_lib.escape(text[:200])}"
             )
         except Exception: pass
-    # Build history
+
+    # ── درخواست آیدی ادمین → ارسال مستقیم ──────
+    if intent == "admin_contact":
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton(f"📞 پیام به @{SUPPORT_USERNAME}", url=f"https://t.me/{SUPPORT_USERNAME}"))
+        kb.add(types.InlineKeyboardButton("🔚 پایان گفتگو", callback_data="support_end"))
+        return bot.send_message(msg.chat.id,
+            f"📞 <b>تماس با پشتیبانی</b>\n\n"
+            f"آیدی ادمین: @{SUPPORT_USERNAME}\n\n"
+            f"برای ارتباط مستقیم، روی دکمه زیر بزنید 👇",
+            reply_markup=kb
+        )
+
+    # ── درخواست وضعیت سرویس → دکمه سرویس‌ها ──
+    if intent == "service_status":
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("📦 مشاهده سرویس‌های من", callback_data="menu_services"))
+        kb.add(types.InlineKeyboardButton("🔚 پایان گفتگو",         callback_data="support_end"))
+        return bot.send_message(msg.chat.id,
+            "📦 <b>مشاهده وضعیت سرویس</b>\n\n"
+            "برای دیدن سرویس‌هات و چک کردن حجم باقی‌مانده:\n\n"
+            "1️⃣ روی دکمه زیر بزن\n"
+            "2️⃣ روی سرویس مورد نظرت بزن\n"
+            "3️⃣ حجم، روزهای مونده و کانفیگ رو ببین 👇",
+            reply_markup=kb
+        )
+
+    # ── درخواست خرید → AI + دکمه فروشگاه ──────
+    # ── حالت عمومی → AI ─────────────────────────
     history = _support_chats.get(uid, [])
     history.append({"role": "user", "content": text})
-    if len(history) > 12: history = history[-12:]
+    if len(history) > 12:
+        history = history[-12:]
     _support_chats[uid] = history
+
     bot.send_chat_action(msg.chat.id, "typing")
     full_msgs = [{"role": "system", "content": _support_ai_system()}] + history
     reply = ai_chat(full_msgs)
     history.append({"role": "assistant", "content": reply})
     _support_chats[uid] = history
-    kb = types.InlineKeyboardMarkup()
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if intent == "buy":
+        kb.add(types.InlineKeyboardButton("🛒 رفتن به فروشگاه", callback_data="menu_shop"))
+    else:
+        kb.add(types.InlineKeyboardButton("🛒 فروشگاه",       callback_data="menu_shop"))
+        kb.add(types.InlineKeyboardButton("📦 سرویس‌های من",  callback_data="menu_services"))
     kb.add(types.InlineKeyboardButton("🔚 پایان گفتگو", callback_data="support_end"))
     bot.send_message(msg.chat.id, f"🤖 {reply}", reply_markup=kb)
+
 
 @bot.callback_query_handler(func=lambda c: c.data == "support_end")
 def cb_support_end(call):
