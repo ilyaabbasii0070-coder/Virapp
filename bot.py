@@ -4305,38 +4305,87 @@ def fallback(msg):
     if is_offline_for(msg.from_user.id): return bot.send_message(msg.chat.id, OFFLINE_MSG)
 
     state = get_state(msg.from_user.id)
+    step = state.get("step", "")
 
-    if msg.from_user.id == ADMIN_ID:
+    # ── هندل استیت‌های ادمین ──────────────────────────
+    if is_admin(msg.from_user.id):
 
         if state.get("action") == "add_force_channel":
-
             channel = msg.text.strip()
-
             add_force_channel(channel)
-
             clear_state(msg.from_user.id)
-
-            return bot.send_message(
-                msg.chat.id,
-                "✅ کانال اضافه شد"
-            )
+            return bot.send_message(msg.chat.id, "✅ کانال اضافه شد")
 
         if state.get("action") == "remove_force_channel":
-
             channel = msg.text.strip()
-
             remove_force_channel(channel)
-
             clear_state(msg.from_user.id)
+            return bot.send_message(msg.chat.id, "✅ کانال حذف شد")
 
-            return bot.send_message(
-                msg.chat.id,
-                "✅ کانال حذف شد"
+        if step == "adm_discount_code":
+            code = (msg.text or "").strip().upper()
+            if not code or len(code) < 3:
+                return bot.send_message(msg.chat.id, "⚠️ کد باید حداقل ۳ کاراکتر باشد.")
+            set_state(msg.from_user.id, step="adm_discount_percent", discount_code=code)
+            return bot.send_message(msg.chat.id,
+                f"✅ کد: <b>{code}</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "حالا درصد تخفیف را وارد کنید:\n\n"
+                "<i>مثال: ۱۰ یا ۲۰ (بین ۱ تا ۱۰۰)</i>"
             )
+
+        if step == "adm_discount_percent":
+            try:
+                percent = int((msg.text or "").strip())
+                if percent < 1 or percent > 100: raise ValueError
+            except ValueError:
+                return bot.send_message(msg.chat.id, "⚠️ عدد بین ۱ تا ۱۰۰ وارد کنید.")
+            code = state.get("discount_code", "")
+            with get_db() as conn:
+                try:
+                    conn.execute("INSERT INTO discount_codes(code, percent) VALUES(?,?)", (code, percent))
+                    conn.commit()
+                    clear_state(msg.from_user.id)
+                    return bot.send_message(msg.chat.id,
+                        f"✅ <b>کد تخفیف ساخته شد!</b>\n\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"🏷️ <b>کد:</b> <code>{code}</code>\n"
+                        f"💰 <b>تخفیف:</b> {percent}٪\n\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        "این کد را به مشتریان بدهید."
+                    )
+                except Exception:
+                    clear_state(msg.from_user.id)
+                    return bot.send_message(msg.chat.id, "❌ این کد قبلاً وجود دارد.")
+
+    # ── افزودن ادمین (فقط ادمین اصلی) ──────────────────
+    if msg.from_user.id == ADMIN_ID and step == "adm_add_admin":
+        try:
+            new_uid = int((msg.text or "").strip())
+        except ValueError:
+            return bot.send_message(msg.chat.id, "⚠️ آیدی باید عدد باشد.")
+        if new_uid == ADMIN_ID:
+            clear_state(msg.from_user.id)
+            return bot.send_message(msg.chat.id, "❌ شما ادمین اصلی هستید.")
+        add_bot_admin(new_uid)
+        clear_state(msg.from_user.id)
+        bot.send_message(msg.chat.id,
+            f"✅ <b>ادمین اضافه شد!</b>\n\n"
+            f"آیدی: <code>{new_uid}</code>\n\n"
+            "این کاربر اکنون به پنل ادمین دسترسی دارد."
+        )
+        try:
+            bot.send_message(new_uid,
+                "🎉 <b>شما به عنوان ادمین ربات اضافه شدید!</b>\n\n"
+                "از منوی اصلی می‌توانید به پنل ادمین دسترسی داشته باشید."
+            )
+        except Exception:
+            pass
+        return
 
     u = get_user(msg.from_user.id)
     if u and u["is_banned"]: return
-    if get_state(msg.from_user.id).get("step"): return
+    if step: return
     send_main_menu(msg.chat.id, msg.from_user.id, "🏠 از منوی زیر انتخاب کنید:")
 
 # ─────────────────────────────────────────────
@@ -5118,46 +5167,6 @@ def cb_ap_create_discount(call):
         reply_markup=kb
     )
 
-@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_discount_code")
-def adm_discount_code_input(msg):
-    code = (msg.text or "").strip().upper()
-    if not code or len(code) < 3:
-        return bot.send_message(msg.chat.id, "⚠️ کد باید حداقل ۳ کاراکتر باشد.")
-    set_state(msg.from_user.id, step="adm_discount_percent", discount_code=code)
-    bot.send_message(msg.chat.id,
-        f"✅ کد: <b>{code}</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "حالا درصد تخفیف را وارد کنید:\n\n"
-        "<i>مثال: ۱۰ یا ۲۰ (بین ۱ تا ۱۰۰)</i>"
-    )
-
-@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_discount_percent")
-def adm_discount_percent_input(msg):
-    try:
-        percent = int((msg.text or "").strip())
-        if percent < 1 or percent > 100:
-            raise ValueError
-    except ValueError:
-        return bot.send_message(msg.chat.id, "⚠️ عدد بین ۱ تا ۱۰۰ وارد کنید.")
-    state = get_state(msg.from_user.id)
-    code = state.get("discount_code", "")
-    with get_db() as conn:
-        try:
-            conn.execute("INSERT INTO discount_codes(code, percent) VALUES(?,?)", (code, percent))
-            conn.commit()
-            clear_state(msg.from_user.id)
-            bot.send_message(msg.chat.id,
-                f"✅ <b>کد تخفیف ساخته شد!</b>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🏷️ <b>کد:</b> <code>{code}</code>\n"
-                f"💰 <b>تخفیف:</b> {percent}٪\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"این کد را به مشتریان بدهید."
-            )
-        except Exception:
-            clear_state(msg.from_user.id)
-            bot.send_message(msg.chat.id, "❌ این کد قبلاً وجود دارد.")
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ap_disc_") and is_admin(c.from_user.id))
 def cb_ap_disc_view(call):
     bot.answer_callback_query(call.id)
@@ -5239,30 +5248,6 @@ def cb_ap_admin_add(call):
         "<i>مثال: 123456789</i>",
         reply_markup=kb
     )
-
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(m.from_user.id).get("step") == "adm_add_admin")
-def adm_add_admin_input(msg):
-    try:
-        new_uid = int((msg.text or "").strip())
-    except ValueError:
-        return bot.send_message(msg.chat.id, "⚠️ آیدی باید عدد باشد.")
-    if new_uid == ADMIN_ID:
-        clear_state(call.from_user.id)
-        return bot.send_message(msg.chat.id, "❌ شما ادمین اصلی هستید.")
-    add_bot_admin(new_uid)
-    clear_state(call.from_user.id)
-    bot.send_message(msg.chat.id,
-        f"✅ <b>ادمین اضافه شد!</b>\n\n"
-        f"آیدی: <code>{new_uid}</code>\n\n"
-        "این کاربر اکنون به پنل ادمین دسترسی دارد."
-    )
-    try:
-        bot.send_message(new_uid,
-            "🎉 <b>شما به عنوان ادمین ربات اضافه شدید!</b>\n\n"
-            "از منوی اصلی می‌توانید به پنل ادمین دسترسی داشته باشید."
-        )
-    except Exception:
-        pass
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ap_admin_view_") and c.from_user.id == ADMIN_ID)
 def cb_ap_admin_view(call):
