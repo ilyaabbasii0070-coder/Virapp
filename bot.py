@@ -4560,7 +4560,7 @@ def cb_smart_support(call):
     safe_delete(call.message.chat.id, call.message.message_id)
 
     # اگر ربات پشتیبانی ثبت شده → هدایت به آن ربات با deep link (استارت خودکار)
-    if SUPPORT_BOT_USERNAME and SUPPORT_BOT_TOKEN:
+    if SUPPORT_BOT_USERNAME:
         kb = types.InlineKeyboardMarkup(row_width=1)
         kb.add(types.InlineKeyboardButton(
             f"🤖 شروع پشتیبانی هوشمند",
