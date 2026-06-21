@@ -66,8 +66,8 @@ PAYMENT_CARD_ENABLED    = True       # فعال/غیرفعال کارت به ک�
 PAYMENT_CRYPTO_ENABLED  = True       # فعال/غیرفعال ترون
 
 # ── ربات پشتیبانی ─────────────────────────────
-SUPPORT_BOT_USERNAME = "Virasupport_bot"   # یوزرنیم ربات پشتیبانی (بدون @)
-SUPPORT_BOT_TOKEN    = ""                  # توکن ربات پشتیبانی
+SUPPORT_BOT_USERNAME = "Virasupport_bot"                        # یوزرنیم ربات پشتیبانی (بدون @)
+SUPPORT_BOT_TOKEN    = os.environ.get("SUPPORT_BOT_TOKEN", "")  # توکن ربات پشتیبانی از Railway
 
 APP_LINK_IOS     = ""
 APP_LINK_ANDROID = ""
