@@ -65,6 +65,10 @@ V2RAY_ENABLED           = True       # نمایش v2ray در فروشگاه
 PAYMENT_CARD_ENABLED    = True       # فعال/غیرفعال کارت به کارت
 PAYMENT_CRYPTO_ENABLED  = True       # فعال/غیرفعال ترون
 
+# ── ربات پشتیبانی ─────────────────────────────
+SUPPORT_BOT_USERNAME = ""   # یوزرنیم ربات پشتیبانی (بدون @)
+SUPPORT_BOT_TOKEN    = ""   # توکن ربات پشتیبانی
+
 APP_LINK_IOS     = ""
 APP_LINK_ANDROID = ""
 
@@ -191,6 +195,12 @@ def init_db():
             admin_msg_id INTEGER,
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS support_bot (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_username TEXT NOT NULL,
+            bot_token TEXT NOT NULL,
+            added_at TEXT DEFAULT (datetime('now'))
+        );
         """)
         try:
             conn.execute("ALTER TABLE order_services ADD COLUMN sub_link TEXT")
@@ -300,6 +310,7 @@ def _reload_settings(conn=None):
     global NOTIFY_NEW_USER, NOTIFY_NEW_ORDER, WELCOME_TEXT
     global SURFSHARK_1YEAR_PRICE, SURFSHARK_ENABLED, V2RAY_ENABLED
     global PAYMENT_CARD_ENABLED, PAYMENT_CRYPTO_ENABLED
+    global SUPPORT_BOT_USERNAME, SUPPORT_BOT_TOKEN
     def _q(c):
         return {r["key"]: r["value"] for r in c.execute("SELECT key,value FROM settings").fetchall()}
     if conn:
@@ -330,6 +341,15 @@ def _reload_settings(conn=None):
     V2RAY_ENABLED          = d.get("v2ray_enabled",     "1") == "1"
     PAYMENT_CARD_ENABLED   = d.get("payment_card_enabled",   "1") == "1"
     PAYMENT_CRYPTO_ENABLED = d.get("payment_crypto_enabled", "1") == "1"
+    # بارگذاری ربات پشتیبانی
+    try:
+        _c = conn if conn else get_db().__enter__()
+        sb = _c.execute("SELECT bot_username, bot_token FROM support_bot ORDER BY id DESC LIMIT 1").fetchone()
+        if sb:
+            SUPPORT_BOT_USERNAME = sb["bot_username"]
+            SUPPORT_BOT_TOKEN    = sb["bot_token"]
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────
 #  HELPERS
@@ -3242,6 +3262,7 @@ def cb_ap_settings(call):
     kb.add(types.InlineKeyboardButton("🔔 مدیریت اعلان‌ها",              callback_data="ap_notifications"))
     kb.add(types.InlineKeyboardButton("🦈 تنظیمات Surfshark",            callback_data="ap_surfshark_settings"))
     kb.add(types.InlineKeyboardButton("💳 روش‌های پرداخت",               callback_data="ap_payment_methods"))
+    kb.add(types.InlineKeyboardButton("🤖 ربات پشتیبانی",                callback_data="ap_support_bot"))
     kb.add(types.InlineKeyboardButton("🗑️ پاکسازی داده‌ها",             callback_data="ap_cleanup"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت به پنل ادمین",          callback_data="menu_admin"))
     bot.send_message(call.message.chat.id,
@@ -4536,6 +4557,28 @@ def _detect_intent(text: str) -> str:
 def cb_smart_support(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
+    safe_delete(call.message.chat.id, call.message.message_id)
+
+    # اگر ربات پشتیبانی ثبت شده → هدایت به آن ربات
+    if SUPPORT_BOT_USERNAME and SUPPORT_BOT_TOKEN:
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton(
+            f"🤖 ورود به ربات پشتیبانی",
+            url=f"https://t.me/{SUPPORT_BOT_USERNAME}"
+        ))
+        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
+        bot.send_message(
+            call.message.chat.id,
+            "🤖 <b>پشتیبانی ViraNet</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "برای دریافت پشتیبانی و خرید سرویس\n"
+            "وارد ربات پشتیبانی اختصاصی شوید 👇\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            reply_markup=kb
+        )
+        return
+
+    # اگر ربات پشتیبانی ثبت نشده → پشتیبانی هوشمند داخلی (رفتار قبلی)
     _support_chats[uid] = []
     safe_delete(call.message.chat.id, call.message.message_id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -5765,6 +5808,611 @@ def cb_ap_admin_fire(call):
         pass
 
 # ─────────────────────────────────────────────
+#  ربات پشتیبانی — مدیریت و راه‌اندازی
+# ─────────────────────────────────────────────
+
+_support_bot_instance = None   # نمونه TeleBot ربات پشتیبانی
+
+def _load_support_bot_settings():
+    """بارگذاری تنظیمات ربات پشتیبانی از دیتابیس"""
+    global SUPPORT_BOT_USERNAME, SUPPORT_BOT_TOKEN
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT bot_username, bot_token FROM support_bot ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                SUPPORT_BOT_USERNAME = row["bot_username"]
+                SUPPORT_BOT_TOKEN    = row["bot_token"]
+    except Exception as e:
+        print(f"[support_bot] load settings error: {e}")
+
+def get_support_bot_info():
+    """اطلاعات ربات پشتیبانی ثبت شده را برمی‌گرداند"""
+    try:
+        with get_db() as conn:
+            return conn.execute(
+                "SELECT * FROM support_bot ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+    except Exception:
+        return None
+
+def save_support_bot(username, token):
+    """ربات پشتیبانی را ذخیره می‌کند"""
+    global SUPPORT_BOT_USERNAME, SUPPORT_BOT_TOKEN
+    with get_db() as conn:
+        conn.execute("DELETE FROM support_bot")
+        conn.execute(
+            "INSERT INTO support_bot(bot_username, bot_token) VALUES(?,?)",
+            (username, token)
+        )
+        conn.commit()
+    SUPPORT_BOT_USERNAME = username
+    SUPPORT_BOT_TOKEN    = token
+
+def delete_support_bot():
+    """ربات پشتیبانی را حذف می‌کند"""
+    global SUPPORT_BOT_USERNAME, SUPPORT_BOT_TOKEN, _support_bot_instance
+    with get_db() as conn:
+        conn.execute("DELETE FROM support_bot")
+        conn.commit()
+    SUPPORT_BOT_USERNAME = ""
+    SUPPORT_BOT_TOKEN    = ""
+    _support_bot_instance = None
+
+def _notify_all_admins_support_photo(caption_text, photo_file_id, reply_markup):
+    """رسید خرید از ربات پشتیبانی را برای همه ادمین‌ها می‌فرستد"""
+    try:
+        bot.send_photo(ADMIN_ID, photo_file_id, caption=caption_text, reply_markup=reply_markup)
+    except Exception as e:
+        print(f"[support_bot] notify main admin error: {e}")
+    with get_db() as conn:
+        sub_admins = conn.execute("SELECT user_id FROM bot_admins").fetchall()
+    for adm in sub_admins:
+        try:
+            bot.send_photo(adm["user_id"], photo_file_id, caption=caption_text, reply_markup=reply_markup)
+        except Exception:
+            pass
+
+def _notify_all_admins_support_text(text):
+    """یک پیام متنی برای همه ادمین‌ها می‌فرستد"""
+    try:
+        bot.send_message(ADMIN_ID, text)
+    except Exception: pass
+    with get_db() as conn:
+        sub_admins = conn.execute("SELECT user_id FROM bot_admins").fetchall()
+    for adm in sub_admins:
+        try:
+            bot.send_message(adm["user_id"], text)
+        except Exception: pass
+
+def _build_sb_ai_system(uid):
+    """سیستم پرامپت هوش مصنوعی برای ربات پشتیبانی"""
+    wallet = get_wallet(uid)
+    plans_text = "\n".join([f"- {p['label']}: {fmt(p['price'])} تومان" for p in PLANS.values()])
+    return (
+        "تو پشتیبان هوشمند ربات ViraNet VPN هستی که در ربات پشتیبانی جداگانه کار می‌کنی.\n"
+        f"موجودی کیف پول کاربر: {fmt(wallet)} تومان\n"
+        f"پلن‌های موجود:\n{plans_text}\n\n"
+        "اگر کاربر خرید می‌خواهد، بگو از دکمه 🛒 فروشگاه استفاده کند.\n"
+        "پاسخ‌ها را فارسی و کوتاه بده."
+    )
+
+def _launch_support_bot(support_token):
+    """ربات پشتیبانی را در thread جداگانه راه‌اندازی می‌کند"""
+    global _support_bot_instance
+
+    def run():
+        global _support_bot_instance
+        try:
+            sbot = telebot.TeleBot(support_token, parse_mode="HTML")
+            _support_bot_instance = sbot
+
+            _sb_states: dict = {}
+            def _sb_set(uid, **kw): _sb_states.setdefault(uid, {}).update(kw)
+            def _sb_get(uid): return _sb_states.get(uid, {})
+            def _sb_clear(uid): _sb_states.pop(uid, None)
+
+            @sbot.message_handler(commands=["start"])
+            def sb_start(msg):
+                ensure_user(msg.from_user)
+                _sb_clear(msg.from_user.id)
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                kb.add(types.InlineKeyboardButton("🛒 فروشگاه ViraNet",    callback_data="sb_shop"))
+                kb.add(types.InlineKeyboardButton("💬 پشتیبانی هوشمند",   callback_data="sb_chat"))
+                kb.add(types.InlineKeyboardButton("💰 کیف پول",            callback_data="sb_wallet"))
+                sbot.send_message(
+                    msg.chat.id,
+                    "🤖 <b>پشتیبانی ViraNet</b>\n\n"
+                    "سلام! اینجا می‌تونی خرید کنی، سوال بپرسی یا مشکلت رو بگی 👇",
+                    reply_markup=kb
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_wallet")
+            def sb_wallet_show(call):
+                sbot.answer_callback_query(call.id)
+                uid = call.from_user.id
+                ensure_user(call.from_user)
+                wallet = get_wallet(uid)
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sb_back"))
+                sbot.send_message(
+                    call.message.chat.id,
+                    f"💰 <b>کیف پول</b>\n\n"
+                    f"✨ موجودی: <b>{fmt(wallet)} تومان</b>\n\n"
+                    "برای شارژ کیف پول از ربات اصلی استفاده کنید.",
+                    reply_markup=kb
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_shop")
+            def sb_shop(call):
+                sbot.answer_callback_query(call.id)
+                ensure_user(call.from_user)
+                _sb_clear(call.from_user.id)
+                reload_plans()
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                if V2RAY_ENABLED and PLANS:
+                    kb.add(types.InlineKeyboardButton("🔵 V2Ray (کانفیگ VPN)", callback_data="sb_v2ray"))
+                if SURFSHARK_ENABLED:
+                    kb.add(types.InlineKeyboardButton(f"🦈 Surfshark یه ساله — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
+                kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sb_back"))
+                sbot.send_message(
+                    call.message.chat.id,
+                    "🛒 <b>فروشگاه ViraNet</b>\n\nچه سرویسی می‌خوای؟ 👇",
+                    reply_markup=kb
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_v2ray")
+            def sb_v2ray(call):
+                sbot.answer_callback_query(call.id)
+                reload_plans()
+                if not PLANS:
+                    return sbot.send_message(call.message.chat.id, "❌ هیچ پلنی موجود نیست.")
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                for key, plan in PLANS.items():
+                    kb.add(types.InlineKeyboardButton(
+                        f"{plan['label']} — {fmt(plan['price'])} تومان",
+                        callback_data=f"sb_plan_{key}"
+                    ))
+                kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sb_shop"))
+                sbot.send_message(
+                    call.message.chat.id,
+                    "🔵 <b>V2Ray — پلن‌ها</b>\n\nپلن مورد نظرت رو انتخاب کن 👇",
+                    reply_markup=kb
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data.startswith("sb_plan_"))
+            def sb_select_plan(call):
+                sbot.answer_callback_query(call.id)
+                plan_key = call.data[8:]
+                plan = PLANS.get(plan_key)
+                if not plan:
+                    return sbot.send_message(call.message.chat.id, "❌ پلن یافت نشد.")
+                uid = call.from_user.id
+                wallet = get_wallet(uid)
+                _sb_set(uid, step="sb_qty", plan_key=plan_key)
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                for q in [1, 2, 3]:
+                    kb.add(types.InlineKeyboardButton(
+                        f"{q} عدد — {fmt(plan['price']*q)} تومان",
+                        callback_data=f"sb_qty_{q}"
+                    ))
+                kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sb_v2ray"))
+                sbot.send_message(
+                    call.message.chat.id,
+                    f"📦 <b>{plan['label']}</b>\n\n"
+                    f"💰 قیمت هر عدد: {fmt(plan['price'])} تومان\n"
+                    f"👛 موجودی کیف پول: {fmt(wallet)} تومان\n\n"
+                    "👇 تعداد مورد نظر را انتخاب کن:",
+                    reply_markup=kb
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data.startswith("sb_qty_"))
+            def sb_select_qty(call):
+                sbot.answer_callback_query(call.id)
+                qty = int(call.data[7:])
+                uid = call.from_user.id
+                state = _sb_get(uid)
+                plan_key = state.get("plan_key")
+                plan = PLANS.get(plan_key)
+                if not plan:
+                    return sbot.send_message(call.message.chat.id, "❌ خطا. دوباره شروع کنید.")
+                total = plan["price"] * qty
+                wallet = get_wallet(uid)
+                _sb_set(uid, step="sb_payment", plan_key=plan_key, qty=qty, total=total)
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                if wallet >= total:
+                    kb.add(types.InlineKeyboardButton(
+                        f"💰 پرداخت از کیف پول ({fmt(wallet)} تومان موجودی)",
+                        callback_data="sb_pay_wallet"
+                    ))
+                if PAYMENT_CARD_ENABLED:
+                    kb.add(types.InlineKeyboardButton("💳 کارت به کارت", callback_data="sb_pay_card"))
+                if PAYMENT_CRYPTO_ENABLED:
+                    kb.add(types.InlineKeyboardButton("💎 پرداخت با TRX", callback_data="sb_pay_crypto"))
+                kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sb_shop"))
+                sbot.send_message(
+                    call.message.chat.id,
+                    f"🛒 <b>سفارش شما</b>\n\n"
+                    f"📦 پلن: {plan['label']}\n"
+                    f"🔢 تعداد: {qty} عدد\n"
+                    f"💰 مبلغ کل: {fmt(total)} تومان\n\n"
+                    "👇 روش پرداخت را انتخاب کن:",
+                    reply_markup=kb
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_pay_wallet")
+            def sb_pay_wallet(call):
+                sbot.answer_callback_query(call.id)
+                uid = call.from_user.id
+                state = _sb_get(uid)
+                plan_key = state.get("plan_key")
+                qty      = state.get("qty", 1)
+                total    = state.get("total", 0)
+                plan     = PLANS.get(plan_key, {})
+                if get_wallet(uid) < total:
+                    return sbot.send_message(call.message.chat.id, "❌ موجودی کیف پول کافی نیست.")
+                with get_db() as conn:
+                    cur = conn.execute(
+                        "INSERT INTO orders(user_id,plan_key,quantity,total_price,payment_method,status) VALUES(?,?,?,?,?,?)",
+                        (uid, plan_key, qty, total, "wallet", "pending")
+                    )
+                    order_id = cur.lastrowid
+                    conn.commit()
+                deduct_wallet(uid, total)
+                u = get_user(uid)
+                uname = (u["username"] or u["full_name"]) if u else str(uid)
+                adm_text = (
+                    f"🛒 <b>سفارش جدید از ربات پشتیبانی!</b>\n\n"
+                    f"👤 @{uname}  |  <code>{uid}</code>\n"
+                    f"📦 {plan.get('label','---')}  ×{qty}\n"
+                    f"💰 {fmt(total)} تومان | کیف پول\n"
+                    f"🕐 {now_str()}\n\n"
+                    f"⚠️ برای تحویل کانفیگ، از پنل ادمین اقدام کنید.\n"
+                    f"🆔 order_id = {order_id}"
+                )
+                _notify_all_admins_support_text(adm_text)
+                _sb_clear(uid)
+                sbot.send_message(
+                    call.message.chat.id,
+                    "✅ <b>سفارش شما ثبت شد!</b>\n\n"
+                    f"📦 {plan.get('label','---')}  ×{qty}\n"
+                    f"💰 {fmt(total)} تومان از کیف پول کسر شد.\n\n"
+                    "⏳ کانفیگ به زودی برایتان ارسال می‌شود.\n\n"
+                    f"❓ پیگیری: @{SUPPORT_USERNAME}"
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_pay_card")
+            def sb_pay_card(call):
+                sbot.answer_callback_query(call.id)
+                uid   = call.from_user.id
+                state = _sb_get(uid)
+                total = state.get("total", 0)
+                _sb_set(uid, step="sb_receipt_card")
+                sbot.send_message(
+                    call.message.chat.id,
+                    f"💳 <b>پرداخت کارت به کارت</b>\n\n"
+                    f"💰 مبلغ: {fmt(total)} تومان\n\n"
+                    f"🏦 شماره کارت:\n<code>{CARD_NUMBER}</code>\n"
+                    f"👤 به نام: <b>{CARD_OWNER}</b>\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "👇 <b>عکس رسید پرداخت را ارسال کنید:</b>"
+                )
+
+            @sbot.message_handler(
+                func=lambda m: _sb_get(m.from_user.id).get("step") == "sb_receipt_card",
+                content_types=["photo"]
+            )
+            def sb_receipt_card(msg):
+                uid      = msg.from_user.id
+                state    = _sb_get(uid)
+                plan_key = state.get("plan_key")
+                qty      = state.get("qty", 1)
+                total    = state.get("total", 0)
+                plan     = PLANS.get(plan_key, {})
+                file_id  = msg.photo[-1].file_id
+                u        = get_user(uid)
+                uname    = (u["username"] or u["full_name"]) if u else str(uid)
+                with get_db() as conn:
+                    cur = conn.execute(
+                        "INSERT INTO orders(user_id,plan_key,quantity,total_price,payment_method,status) VALUES(?,?,?,?,?,?)",
+                        (uid, plan_key, qty, total, "card", "pending")
+                    )
+                    order_id = cur.lastrowid
+                    cur2 = conn.execute(
+                        "INSERT INTO receipts(user_id,order_id,wallet_amount,receipt_type,file_id,status) VALUES(?,?,?,?,?,?)",
+                        (uid, order_id, total, "purchase_card", file_id, "pending")
+                    )
+                    receipt_id = cur2.lastrowid
+                    conn.commit()
+                adm_kb = types.InlineKeyboardMarkup(row_width=2)
+                adm_kb.add(
+                    types.InlineKeyboardButton("✅ تایید", callback_data=f"recv_ok_{receipt_id}"),
+                    types.InlineKeyboardButton("❌ رد",   callback_data=f"recv_rej_{receipt_id}"),
+                )
+                caption = (
+                    f"📥 <b>رسید خرید از ربات پشتیبانی</b>\n\n"
+                    f"👤 @{uname}  |  <code>{uid}</code>\n"
+                    f"📦 {plan.get('label','---')}  ×{qty}\n"
+                    f"💰 {fmt(total)} تومان | کارت\n"
+                    f"🕐 {now_str()}"
+                )
+                _notify_all_admins_support_photo(caption, file_id, adm_kb)
+                _sb_clear(uid)
+                sbot.send_message(
+                    msg.chat.id,
+                    "📥 <b>رسید دریافت شد!</b>\n\n"
+                    "⏳ در صف بررسی قرار گرفت.\n"
+                    "⏱️ معمولاً کمتر از ۳۰ دقیقه\n\n"
+                    f"❓ پیگیری: @{SUPPORT_USERNAME}"
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_pay_crypto")
+            def sb_pay_crypto(call):
+                sbot.answer_callback_query(call.id)
+                uid   = call.from_user.id
+                state = _sb_get(uid)
+                total = state.get("total", 0)
+                trx   = toman_to_trx(total)
+                _sb_set(uid, step="sb_receipt_crypto")
+                sbot.send_message(
+                    call.message.chat.id,
+                    f"💎 <b>پرداخت با TRX</b>\n\n"
+                    f"💰 مبلغ: {fmt(total)} تومان\n"
+                    + (f"🔷 معادل: <code>{trx}</code> TRX\n\n" if trx else "\n") +
+                    f"📌 آدرس:\n<code>{TRX_WALLET}</code>\n\n"
+                    "⚠️ فقط شبکه TRON (TRC-20)\n\n"
+                    "👇 عکس رسید تراکنش را ارسال کنید:"
+                )
+
+            @sbot.message_handler(
+                func=lambda m: _sb_get(m.from_user.id).get("step") == "sb_receipt_crypto",
+                content_types=["photo"]
+            )
+            def sb_receipt_crypto(msg):
+                uid      = msg.from_user.id
+                state    = _sb_get(uid)
+                plan_key = state.get("plan_key")
+                qty      = state.get("qty", 1)
+                total    = state.get("total", 0)
+                plan     = PLANS.get(plan_key, {})
+                file_id  = msg.photo[-1].file_id
+                u        = get_user(uid)
+                uname    = (u["username"] or u["full_name"]) if u else str(uid)
+                with get_db() as conn:
+                    cur = conn.execute(
+                        "INSERT INTO orders(user_id,plan_key,quantity,total_price,payment_method,status) VALUES(?,?,?,?,?,?)",
+                        (uid, plan_key, qty, total, "crypto", "pending")
+                    )
+                    order_id = cur.lastrowid
+                    cur2 = conn.execute(
+                        "INSERT INTO receipts(user_id,order_id,wallet_amount,receipt_type,file_id,status) VALUES(?,?,?,?,?,?)",
+                        (uid, order_id, total, "purchase_crypto", file_id, "pending")
+                    )
+                    receipt_id = cur2.lastrowid
+                    conn.commit()
+                adm_kb = types.InlineKeyboardMarkup(row_width=2)
+                adm_kb.add(
+                    types.InlineKeyboardButton("✅ تایید", callback_data=f"recv_ok_{receipt_id}"),
+                    types.InlineKeyboardButton("❌ رد",   callback_data=f"recv_rej_{receipt_id}"),
+                )
+                caption = (
+                    f"📥 <b>رسید خرید از ربات پشتیبانی</b>\n\n"
+                    f"👤 @{uname}  |  <code>{uid}</code>\n"
+                    f"📦 {plan.get('label','---')}  ×{qty}\n"
+                    f"💰 {fmt(total)} تومان | TRX\n"
+                    f"🕐 {now_str()}"
+                )
+                _notify_all_admins_support_photo(caption, file_id, adm_kb)
+                _sb_clear(uid)
+                sbot.send_message(
+                    msg.chat.id,
+                    "📥 <b>رسید دریافت شد!</b>\n\n"
+                    "⏳ در صف بررسی قرار گرفت.\n\n"
+                    f"❓ پیگیری: @{SUPPORT_USERNAME}"
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_chat")
+            def sb_chat_start(call):
+                sbot.answer_callback_query(call.id)
+                _sb_set(call.from_user.id, step="sb_chatting", history=[])
+                sbot.send_message(
+                    call.message.chat.id,
+                    "💬 <b>پشتیبانی هوشمند</b>\n\n"
+                    "سوالت رو بنویس، راهنماییت می‌کنم 🤖\n\n"
+                    "برای پایان /end بنویس."
+                )
+
+            @sbot.message_handler(func=lambda m: _sb_get(m.from_user.id).get("step") == "sb_chatting")
+            def sb_chatting(msg):
+                uid  = msg.from_user.id
+                text = (msg.text or "").strip()
+                if text == "/end":
+                    _sb_clear(uid)
+                    kb = types.InlineKeyboardMarkup()
+                    kb.add(types.InlineKeyboardButton("🏠 منوی اصلی", callback_data="sb_back"))
+                    return sbot.send_message(msg.chat.id, "✅ گفتگو پایان یافت.", reply_markup=kb)
+                history = _sb_get(uid).get("history", [])
+                history.append({"role": "user", "content": text})
+                full_msgs = [{"role": "system", "content": _build_sb_ai_system(uid)}] + history[-10:]
+                reply = ai_chat(full_msgs)
+                history.append({"role": "assistant", "content": reply})
+                _sb_set(uid, history=history)
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                kb.add(types.InlineKeyboardButton("🛒 فروشگاه", callback_data="sb_shop"))
+                kb.add(types.InlineKeyboardButton("🔚 پایان",   callback_data="sb_end"))
+                sbot.send_message(msg.chat.id, reply, reply_markup=kb)
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_end")
+            def sb_end(call):
+                sbot.answer_callback_query(call.id)
+                _sb_clear(call.from_user.id)
+                kb = types.InlineKeyboardMarkup()
+                kb.add(types.InlineKeyboardButton("🏠 شروع مجدد", callback_data="sb_back"))
+                sbot.send_message(call.message.chat.id, "✅ گفتگو پایان یافت.", reply_markup=kb)
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_back")
+            def sb_back_main(call):
+                sbot.answer_callback_query(call.id)
+                _sb_clear(call.from_user.id)
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                kb.add(types.InlineKeyboardButton("🛒 فروشگاه",         callback_data="sb_shop"))
+                kb.add(types.InlineKeyboardButton("💬 پشتیبانی هوشمند", callback_data="sb_chat"))
+                kb.add(types.InlineKeyboardButton("💰 کیف پول",          callback_data="sb_wallet"))
+                sbot.send_message(
+                    call.message.chat.id,
+                    "🤖 <b>پشتیبانی ViraNet</b>\n\n👇 انتخاب کن:",
+                    reply_markup=kb
+                )
+
+            @sbot.message_handler(func=lambda m: True, content_types=["text", "photo", "document"])
+            def sb_fallback(msg):
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                kb.add(types.InlineKeyboardButton("🛒 فروشگاه",         callback_data="sb_shop"))
+                kb.add(types.InlineKeyboardButton("💬 پشتیبانی هوشمند", callback_data="sb_chat"))
+                sbot.send_message(msg.chat.id, "👋 از منوی زیر انتخاب کن:", reply_markup=kb)
+
+            print(f"[support_bot] ✅ راه‌اندازی شد: @{SUPPORT_BOT_USERNAME}")
+            sbot.infinity_polling(timeout=40, long_polling_timeout=20)
+        except Exception as e:
+            print(f"[support_bot] ❌ خطا در اجرا: {e}")
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+# ─────────────────────────────────────────────
+#  تنظیمات ادمین: افزودن ربات پشتیبانی
+# ─────────────────────────────────────────────
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_support_bot" and is_admin(c.from_user.id))
+def cb_ap_support_bot(call):
+    bot.answer_callback_query(call.id)
+    sb = get_support_bot_info()
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    if sb:
+        kb.add(types.InlineKeyboardButton("✏️ ویرایش ربات پشتیبانی", callback_data="ap_support_bot_add"))
+        kb.add(types.InlineKeyboardButton("🗑️ حذف ربات پشتیبانی",   callback_data="ap_support_bot_del"))
+    else:
+        kb.add(types.InlineKeyboardButton("➕ افزودن ربات پشتیبانی", callback_data="ap_support_bot_add"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات", callback_data="ap_settings"))
+    if sb:
+        status_text = (
+            f"✅ <b>ربات پشتیبانی ثبت شده</b>\n\n"
+            f"🤖 یوزرنیم: <b>@{sb['bot_username']}</b>\n"
+            f"📅 ثبت شده: {sb['added_at'][:16]}\n\n"
+            "وقتی مشتری روی «پشتیبانی هوشمند» بزند به این ربات هدایت می‌شود."
+        )
+    else:
+        status_text = (
+            "❌ <b>هیچ ربات پشتیبانی ثبت نشده</b>\n\n"
+            "با افزودن ربات پشتیبانی، مشتریان به آن هدایت می‌شوند\n"
+            "و رسیدهای خریدشان برای ادمین ارسال می‌شود."
+        )
+    bot.send_message(
+        call.message.chat.id,
+        "🤖 <b>ربات پشتیبانی</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        + status_text +
+        "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_support_bot_add" and is_admin(c.from_user.id))
+def cb_ap_support_bot_add(call):
+    bot.answer_callback_query(call.id)
+    set_state(call.from_user.id, step="adm_support_bot_username")
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="ap_support_bot"))
+    bot.send_message(
+        call.message.chat.id,
+        "🤖 <b>افزودن ربات پشتیبانی</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📌 <b>مرحله ۱:</b> یوزرنیم ربات پشتیبانی را ارسال کنید\n\n"
+        "💡 مثال: ViraNetSupport (بدون @)\n\n"
+        "👇 یوزرنیم ربات را وارد کنید:",
+        reply_markup=kb
+    )
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_support_bot_username")
+def adm_support_bot_username(msg):
+    val = (msg.text or "").strip().lstrip("@")
+    if not val or " " in val:
+        return bot.send_message(msg.chat.id, "⚠️ یوزرنیم نامعتبر است (بدون @ و بدون فاصله).")
+    set_state(msg.from_user.id, step="adm_support_bot_token", sb_username=val)
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="ap_support_bot"))
+    bot.send_message(
+        msg.chat.id,
+        f"✅ یوزرنیم <b>@{val}</b> دریافت شد.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📌 <b>مرحله ۲:</b> توکن ربات پشتیبانی را ارسال کنید\n\n"
+        "💡 توکن را از @BotFather دریافت کنید\n"
+        "مثال: <code>1234567890:ABCdef...</code>\n\n"
+        "👇 توکن ربات را وارد کنید:",
+        reply_markup=kb
+    )
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_support_bot_token")
+def adm_support_bot_token(msg):
+    token = (msg.text or "").strip()
+    if not token or ":" not in token or len(token) < 20:
+        return bot.send_message(
+            msg.chat.id,
+            "⚠️ <b>توکن نامعتبر!</b>\n\nفرمت صحیح: <code>1234567890:ABCdef...</code>"
+        )
+    state = get_state(msg.from_user.id)
+    username = state.get("sb_username", "")
+    # اعتبارسنجی توکن
+    try:
+        test_bot = telebot.TeleBot(token)
+        info = test_bot.get_me()
+        real_username = info.username or username
+    except Exception:
+        return bot.send_message(
+            msg.chat.id,
+            "❌ <b>توکن نامعتبر یا ربات قابل دسترس نیست.</b>\n\n"
+            "توکن را از @BotFather بررسی کنید."
+        )
+    save_support_bot(real_username, token)
+    clear_state(msg.from_user.id)
+    _launch_support_bot(token)
+    bot.send_message(
+        msg.chat.id,
+        f"✅ <b>ربات پشتیبانی با موفقیت ثبت و راه‌اندازی شد!</b> 🎉\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🤖 یوزرنیم: <b>@{real_username}</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "✨ از این به بعد:\n\n"
+        "   🔹 مشتریان با کلیک روی «پشتیبانی هوشمند» به این ربات هدایت می‌شوند\n"
+        "   🔹 خریدهای ربات پشتیبانی برای همه ادمین‌ها ارسال می‌شود\n"
+        "   🔹 مشتری می‌تواند از طریق ربات پشتیبانی خرید کند یا سوال بپرسد"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_support_bot_del" and is_admin(c.from_user.id))
+def cb_ap_support_bot_del(call):
+    bot.answer_callback_query(call.id)
+    sb = get_support_bot_info()
+    if not sb:
+        return bot.send_message(call.message.chat.id, "❌ ربات پشتیبانی ثبت نشده.")
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("✅ بله، حذف شود", callback_data="ap_support_bot_del_ok"),
+        types.InlineKeyboardButton("❌ انصراف",        callback_data="ap_support_bot"),
+    )
+    bot.send_message(
+        call.message.chat.id,
+        f"⚠️ آیا مطمئنید می‌خواهید ربات <b>@{sb['bot_username']}</b> را حذف کنید؟",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_support_bot_del_ok" and is_admin(c.from_user.id))
+def cb_ap_support_bot_del_ok(call):
+    bot.answer_callback_query(call.id)
+    delete_support_bot()
+    bot.send_message(call.message.chat.id, "✅ ربات پشتیبانی حذف شد.\n\nاز این به بعد مشتریان دوباره به پشتیبانی داخلی هدایت می‌شوند.")
+
+
+# ─────────────────────────────────────────────
 #  FLASK
 # ─────────────────────────────────────────────
 flask_app = Flask(__name__)
@@ -5956,6 +6604,7 @@ def run_flask(): flask_app.run(host="0.0.0.0", port=PORT, debug=False)
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     init_db()
+    _load_support_bot_settings()
     print(f"🚀 ViraNet Bot | port={PORT} | admin={ADMIN_ID} | webapp={WEBAPP_URL or 'disabled'}")
     threading.Thread(target=run_flask, daemon=True).start()
     print("✅ Flask started")
@@ -5965,4 +6614,7 @@ if __name__ == "__main__":
     print("✅ Expiry notification monitor started")
     threading.Thread(target=_winback_monitor, daemon=True).start()
     print("✅ Winback monitor started")
+    if SUPPORT_BOT_TOKEN:
+        _launch_support_bot(SUPPORT_BOT_TOKEN)
+        print(f"✅ Support bot launched: @{SUPPORT_BOT_USERNAME}")
     bot.infinity_polling(timeout=60, long_polling_timeout=30)
