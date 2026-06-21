@@ -4559,20 +4559,20 @@ def cb_smart_support(call):
     uid = call.from_user.id
     safe_delete(call.message.chat.id, call.message.message_id)
 
-    # اگر ربات پشتیبانی ثبت شده → هدایت به آن ربات
+    # اگر ربات پشتیبانی ثبت شده → هدایت به آن ربات با deep link (استارت خودکار)
     if SUPPORT_BOT_USERNAME and SUPPORT_BOT_TOKEN:
         kb = types.InlineKeyboardMarkup(row_width=1)
         kb.add(types.InlineKeyboardButton(
-            f"🤖 ورود به ربات پشتیبانی",
-            url=f"https://t.me/{SUPPORT_BOT_USERNAME}"
+            f"🤖 شروع پشتیبانی هوشمند",
+            url=f"https://t.me/{SUPPORT_BOT_USERNAME}?start=from_main"
         ))
         kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
         bot.send_message(
             call.message.chat.id,
-            "🤖 <b>پشتیبانی ViraNet</b>\n\n"
+            "🤖 <b>پشتیبانی هوشمند ViraNet</b>\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "برای دریافت پشتیبانی و خرید سرویس\n"
-            "وارد ربات پشتیبانی اختصاصی شوید 👇\n\n"
+            "روی دکمه زیر بزنید تا وارد ربات پشتیبانی شوید.\n"
+            "ربات به صورت خودکار شروع می‌شود 👇\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             reply_markup=kb
         )
@@ -5917,14 +5917,22 @@ def _launch_support_bot(support_token):
             def sb_start(msg):
                 ensure_user(msg.from_user)
                 _sb_clear(msg.from_user.id)
+                name = (msg.from_user.first_name or "دوست عزیز")
                 kb = types.InlineKeyboardMarkup(row_width=1)
-                kb.add(types.InlineKeyboardButton("🛒 فروشگاه ViraNet",    callback_data="sb_shop"))
-                kb.add(types.InlineKeyboardButton("💬 پشتیبانی هوشمند",   callback_data="sb_chat"))
-                kb.add(types.InlineKeyboardButton("💰 کیف پول",            callback_data="sb_wallet"))
+                kb.add(types.InlineKeyboardButton("🛒 خرید سرویس",          callback_data="sb_shop"))
+                kb.add(types.InlineKeyboardButton("💬 سوال دارم (چت هوشمند)", callback_data="sb_chat"))
+                kb.add(types.InlineKeyboardButton("💰 موجودی کیف پول",       callback_data="sb_wallet"))
                 sbot.send_message(
                     msg.chat.id,
-                    "🤖 <b>پشتیبانی ViraNet</b>\n\n"
-                    "سلام! اینجا می‌تونی خرید کنی، سوال بپرسی یا مشکلت رو بگی 👇",
+                    f"👋 سلام <b>{name}</b> عزیز!\n\n"
+                    "🤖 <b>پشتیبانی هوشمند ViraNet</b>\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "چطور می‌تونم کمکتون کنم؟ 😊\n\n"
+                    "🔹 <b>خرید سرویس VPN</b> — خرید مستقیم از اینجا\n"
+                    "🔹 <b>سوال دارم</b> — هرچی بخوای بپرس\n"
+                    "🔹 <b>کیف پول</b> — موجودیتو ببین\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "👇 یکی رو انتخاب کن:",
                     reply_markup=kb
                 )
 
@@ -6018,8 +6026,73 @@ def _launch_support_bot(support_token):
                 if not plan:
                     return sbot.send_message(call.message.chat.id, "❌ خطا. دوباره شروع کنید.")
                 total = plan["price"] * qty
+                _sb_set(uid, step="sb_discount", plan_key=plan_key, qty=qty, total=total, base_total=total)
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                kb.add(types.InlineKeyboardButton("⬅️ ندارم، ادامه بده", callback_data="sb_no_discount"))
+                sbot.send_message(
+                    call.message.chat.id,
+                    f"🛒 <b>سفارش شما</b>\n\n"
+                    f"📦 پلن: {plan['label']}\n"
+                    f"🔢 تعداد: {qty} عدد\n"
+                    f"💰 مبلغ: {fmt(total)} تومان\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "🏷️ <b>کد تخفیف داری؟</b>\n\n"
+                    "اگه کد تخفیف داری الان وارد کن،\n"
+                    "وگرنه روی دکمه زیر بزن تا ادامه بدیم 👇"
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_no_discount")
+            def sb_no_discount(call):
+                sbot.answer_callback_query(call.id)
+                uid = call.from_user.id
+                state = _sb_get(uid)
+                _sb_set(uid, step="sb_payment")
+                _sb_show_payment(call.message.chat.id, uid, state)
+
+            @sbot.message_handler(func=lambda m: _sb_get(m.from_user.id).get("step") == "sb_discount")
+            def sb_apply_discount(msg):
+                uid = msg.from_user.id
+                code = (msg.text or "").strip().upper()
+                state = _sb_get(uid)
+                base_total = state.get("base_total", state.get("total", 0))
+                d = get_discount(code, uid)
+                if d == "already_used":
+                    sbot.send_message(msg.chat.id,
+                        "❌ این کد تخفیف قبلاً توسط شما استفاده شده.\n\n"
+                        "کد دیگری وارد کن یا بدون تخفیف ادامه بده 👇",
+                        reply_markup=types.InlineKeyboardMarkup().add(
+                            types.InlineKeyboardButton("⬅️ بدون تخفیف ادامه بده", callback_data="sb_no_discount")
+                        )
+                    )
+                    return
+                if not d:
+                    sbot.send_message(msg.chat.id,
+                        "❌ کد تخفیف نامعتبر یا منقضی شده.\n\n"
+                        "دوباره امتحان کن یا بدون تخفیف ادامه بده 👇",
+                        reply_markup=types.InlineKeyboardMarkup().add(
+                            types.InlineKeyboardButton("⬅️ بدون تخفیف ادامه بده", callback_data="sb_no_discount")
+                        )
+                    )
+                    return
+                discounted = apply_discount(base_total, d["percent"])
+                _sb_set(uid, step="sb_payment", total=discounted, discount_code=code, discount_percent=d["percent"])
+                sbot.send_message(msg.chat.id,
+                    f"✅ <b>کد تخفیف اعمال شد!</b>\n\n"
+                    f"🏷️ کد: <code>{code}</code>\n"
+                    f"💸 تخفیف: {d['percent']}٪\n"
+                    f"💰 مبلغ قبل: {fmt(base_total)} تومان\n"
+                    f"✨ مبلغ بعد از تخفیف: <b>{fmt(discounted)} تومان</b>\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                )
+                _sb_show_payment(msg.chat.id, uid, _sb_get(uid))
+
+            def _sb_show_payment(chat_id, uid, state):
+                """نمایش روش‌های پرداخت در ربات پشتیبانی"""
+                plan_key = state.get("plan_key")
+                plan = PLANS.get(plan_key, {})
+                qty = state.get("qty", 1)
+                total = state.get("total", 0)
                 wallet = get_wallet(uid)
-                _sb_set(uid, step="sb_payment", plan_key=plan_key, qty=qty, total=total)
                 kb = types.InlineKeyboardMarkup(row_width=1)
                 if wallet >= total:
                     kb.add(types.InlineKeyboardButton(
@@ -6031,12 +6104,16 @@ def _launch_support_bot(support_token):
                 if PAYMENT_CRYPTO_ENABLED:
                     kb.add(types.InlineKeyboardButton("💎 پرداخت با TRX", callback_data="sb_pay_crypto"))
                 kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sb_shop"))
+                discount_txt = ""
+                if state.get("discount_code"):
+                    discount_txt = f"🏷️ تخفیف {state['discount_percent']}٪ اعمال شد\n"
                 sbot.send_message(
-                    call.message.chat.id,
-                    f"🛒 <b>سفارش شما</b>\n\n"
-                    f"📦 پلن: {plan['label']}\n"
+                    chat_id,
+                    f"🛒 <b>سفارش نهایی</b>\n\n"
+                    f"📦 پلن: {plan.get('label','---')}\n"
                     f"🔢 تعداد: {qty} عدد\n"
-                    f"💰 مبلغ کل: {fmt(total)} تومان\n\n"
+                    f"{discount_txt}"
+                    f"💰 مبلغ قابل پرداخت: <b>{fmt(total)} تومان</b>\n\n"
                     "👇 روش پرداخت را انتخاب کن:",
                     reply_markup=kb
                 )
@@ -6050,6 +6127,7 @@ def _launch_support_bot(support_token):
                 qty      = state.get("qty", 1)
                 total    = state.get("total", 0)
                 plan     = PLANS.get(plan_key, {})
+                discount_code = state.get("discount_code")
                 if get_wallet(uid) < total:
                     return sbot.send_message(call.message.chat.id, "❌ موجودی کیف پول کافی نیست.")
                 with get_db() as conn:
@@ -6060,13 +6138,16 @@ def _launch_support_bot(support_token):
                     order_id = cur.lastrowid
                     conn.commit()
                 deduct_wallet(uid, total)
+                if discount_code:
+                    mark_discount_used(discount_code, uid)
                 u = get_user(uid)
                 uname = (u["username"] or u["full_name"]) if u else str(uid)
+                disc_txt = f"\n🏷️ کد تخفیف: {discount_code}" if discount_code else ""
                 adm_text = (
                     f"🛒 <b>سفارش جدید از ربات پشتیبانی!</b>\n\n"
                     f"👤 @{uname}  |  <code>{uid}</code>\n"
                     f"📦 {plan.get('label','---')}  ×{qty}\n"
-                    f"💰 {fmt(total)} تومان | کیف پول\n"
+                    f"💰 {fmt(total)} تومان | کیف پول{disc_txt}\n"
                     f"🕐 {now_str()}\n\n"
                     f"⚠️ برای تحویل کانفیگ، از پنل ادمین اقدام کنید.\n"
                     f"🆔 order_id = {order_id}"
@@ -6092,7 +6173,7 @@ def _launch_support_bot(support_token):
                 sbot.send_message(
                     call.message.chat.id,
                     f"💳 <b>پرداخت کارت به کارت</b>\n\n"
-                    f"💰 مبلغ: {fmt(total)} تومان\n\n"
+                    f"💰 مبلغ: <b>{fmt(total)} تومان</b>\n\n"
                     f"🏦 شماره کارت:\n<code>{CARD_NUMBER}</code>\n"
                     f"👤 به نام: <b>{CARD_OWNER}</b>\n\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -6111,6 +6192,7 @@ def _launch_support_bot(support_token):
                 total    = state.get("total", 0)
                 plan     = PLANS.get(plan_key, {})
                 file_id  = msg.photo[-1].file_id
+                discount_code = state.get("discount_code")
                 u        = get_user(uid)
                 uname    = (u["username"] or u["full_name"]) if u else str(uid)
                 with get_db() as conn:
@@ -6125,16 +6207,19 @@ def _launch_support_bot(support_token):
                     )
                     receipt_id = cur2.lastrowid
                     conn.commit()
+                if discount_code:
+                    mark_discount_used(discount_code, uid)
                 adm_kb = types.InlineKeyboardMarkup(row_width=2)
                 adm_kb.add(
                     types.InlineKeyboardButton("✅ تایید", callback_data=f"recv_ok_{receipt_id}"),
                     types.InlineKeyboardButton("❌ رد",   callback_data=f"recv_rej_{receipt_id}"),
                 )
+                disc_txt = f"\n🏷️ کد تخفیف: {discount_code}" if discount_code else ""
                 caption = (
                     f"📥 <b>رسید خرید از ربات پشتیبانی</b>\n\n"
                     f"👤 @{uname}  |  <code>{uid}</code>\n"
                     f"📦 {plan.get('label','---')}  ×{qty}\n"
-                    f"💰 {fmt(total)} تومان | کارت\n"
+                    f"💰 {fmt(total)} تومان | کارت{disc_txt}\n"
                     f"🕐 {now_str()}"
                 )
                 _notify_all_admins_support_photo(caption, file_id, adm_kb)
@@ -6177,6 +6262,7 @@ def _launch_support_bot(support_token):
                 total    = state.get("total", 0)
                 plan     = PLANS.get(plan_key, {})
                 file_id  = msg.photo[-1].file_id
+                discount_code = state.get("discount_code")
                 u        = get_user(uid)
                 uname    = (u["username"] or u["full_name"]) if u else str(uid)
                 with get_db() as conn:
@@ -6191,16 +6277,19 @@ def _launch_support_bot(support_token):
                     )
                     receipt_id = cur2.lastrowid
                     conn.commit()
+                if discount_code:
+                    mark_discount_used(discount_code, uid)
                 adm_kb = types.InlineKeyboardMarkup(row_width=2)
                 adm_kb.add(
                     types.InlineKeyboardButton("✅ تایید", callback_data=f"recv_ok_{receipt_id}"),
                     types.InlineKeyboardButton("❌ رد",   callback_data=f"recv_rej_{receipt_id}"),
                 )
+                disc_txt = f"\n🏷️ کد تخفیف: {discount_code}" if discount_code else ""
                 caption = (
                     f"📥 <b>رسید خرید از ربات پشتیبانی</b>\n\n"
                     f"👤 @{uname}  |  <code>{uid}</code>\n"
                     f"📦 {plan.get('label','---')}  ×{qty}\n"
-                    f"💰 {fmt(total)} تومان | TRX\n"
+                    f"💰 {fmt(total)} تومان | TRX{disc_txt}\n"
                     f"🕐 {now_str()}"
                 )
                 _notify_all_admins_support_photo(caption, file_id, adm_kb)
