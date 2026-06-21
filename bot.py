@@ -143,6 +143,24 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             used_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS bot_admins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE NOT NULL,
+            added_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS discount_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            percent INTEGER NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            active INTEGER DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS expiry_notified (
+            user_id INTEGER NOT NULL,
+            svc_id INTEGER NOT NULL,
+            notified_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, svc_id)
+        );
         CREATE TABLE IF NOT EXISTS surfshark_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -521,6 +539,28 @@ OFFLINE_MSG = (
 
 def is_offline_for(uid): return not BOT_ONLINE and uid != ADMIN_ID
 
+def is_admin(uid):
+    """چک می‌کند آیا کاربر ادمین اصلی یا ادمین فرعی است"""
+    if uid == ADMIN_ID:
+        return True
+    with get_db() as conn:
+        return bool(conn.execute("SELECT 1 FROM bot_admins WHERE user_id=?", (uid,)).fetchone())
+
+def get_all_admins():
+    """لیست همه ادمین‌های فرعی"""
+    with get_db() as conn:
+        return conn.execute("SELECT * FROM bot_admins ORDER BY added_at").fetchall()
+
+def add_bot_admin(uid):
+    with get_db() as conn:
+        conn.execute("INSERT OR IGNORE INTO bot_admins(user_id) VALUES(?)", (uid,))
+        conn.commit()
+
+def remove_bot_admin(uid):
+    with get_db() as conn:
+        conn.execute("DELETE FROM bot_admins WHERE user_id=?", (uid,))
+        conn.commit()
+
 # ───────── عضو اجباری ─────────
 
 def get_force_channels():
@@ -637,7 +677,7 @@ def main_menu_kb(user_id):
     # ردیف ۶: درخواست نمایندگی
     kb.add(types.InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="menu_agency"))
 
-    if user_id == ADMIN_ID:
+    if user_id == ADMIN_ID or is_admin(user_id):
         kb.add(
             types.InlineKeyboardButton("🔴 خاموش", callback_data="admin_bot_off"),
             types.InlineKeyboardButton("🟢 روشن",  callback_data="admin_bot_on"),
@@ -784,9 +824,9 @@ def cb_menu_referral(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_admin")
 def cb_menu_admin(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
-    bot.answer_callback_query(call.id); clear_state(ADMIN_ID)
-    _show_admin_panel(call.message.chat.id)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    bot.answer_callback_query(call.id); clear_state(call.from_user.id)
+    _show_admin_panel(call.message.chat.id, call.from_user.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "back_main")
 def cb_back_main(call):
@@ -797,14 +837,14 @@ def cb_back_main(call):
 @bot.callback_query_handler(func=lambda c: c.data == "admin_bot_off")
 def cb_bot_off(call):
     global BOT_ONLINE
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     bot.answer_callback_query(call.id); BOT_ONLINE = False
     bot.send_message(call.message.chat.id, "🔴 <b>ربات خاموش شد.</b>")
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_bot_on")
 def cb_bot_on(call):
     global BOT_ONLINE
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     bot.answer_callback_query(call.id); BOT_ONLINE = True
     bot.send_message(call.message.chat.id, "🟢 <b>ربات روشن شد.</b>")
 
@@ -1150,7 +1190,7 @@ def agency_shop_name_input(msg):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agency_ok_"))
 def cb_agency_approve(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     req_id = int(call.data[10:])
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -1219,7 +1259,7 @@ def cb_agency_approve(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("agency_rej_"))
 def cb_agency_reject(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     req_id = int(call.data[11:])
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -1686,7 +1726,7 @@ def cb_payment(call):
         deduct_wallet(call.from_user.id, total)
         _create_order_and_notify(call.from_user.id, call.message.chat.id, state, "wallet")
     elif call.data == "pay_card":
-        _create_order_and_notify(call.from_user.id, call.message.chat.id, state, "card")
+        _ask_discount_code(call.from_user.id, call.message.chat.id, state)
     else:
         _start_crypto_payment(call.from_user.id, call.message.chat.id, state)
 
@@ -1754,6 +1794,66 @@ def cb_crypto_back(call):
     if uid in crypto_stop_events: crypto_stop_events[uid].set(); del crypto_stop_events[uid]
     set_state(uid, step="shop_payment")
     _ask_payment(call.message.chat.id, uid)
+
+def _ask_discount_code(user_id, chat_id, state):
+    """از کاربر می‌خواهد کد تخفیف وارد کند یا رد شود"""
+    set_state(user_id, step="shop_discount_wait",
+              plan_key=state.get("plan_key"), quantity=state.get("quantity"),
+              total_price=state.get("total_price"), names=state.get("names", []),
+              original_price=state.get("total_price"))
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="pay_no_discount"))
+    total = state.get("total_price", 0)
+    bot.send_message(chat_id,
+        f"💳 <b>پرداخت کارت به کارت</b>\n\n"
+        f"💰 <b>مبلغ:</b> {fmt(total)} تومان\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🏷️ <b>کد تخفیف دارید؟</b>\n\n"
+        "کد تخفیف را وارد کنید، یا دکمه زیر را بزنید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "pay_no_discount")
+def cb_pay_no_discount(call):
+    if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
+    bot.answer_callback_query(call.id)
+    state = get_state(call.from_user.id)
+    if state.get("step") != "shop_discount_wait": return
+    set_state(call.from_user.id, step="shop_payment")
+    _create_order_and_notify(call.from_user.id, call.message.chat.id, state, "card")
+
+@bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "shop_discount_wait")
+def shop_discount_code_input(msg):
+    if is_offline_for(msg.from_user.id): return bot.send_message(msg.chat.id, OFFLINE_MSG)
+    code = (msg.text or "").strip().upper()
+    state = get_state(msg.from_user.id)
+    disc = get_discount(code)
+    original_price = state.get("original_price", state.get("total_price", 0))
+    if not disc:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="pay_no_discount"))
+        return bot.send_message(msg.chat.id,
+            "❌ <b>کد تخفیف معتبر نیست!</b>\n\n"
+            "کد دیگری وارد کنید یا دکمه زیر را بزنید:",
+            reply_markup=kb
+        )
+    new_price = apply_discount(original_price, disc["percent"])
+    set_state(msg.from_user.id, step="shop_payment", total_price=new_price,
+              plan_key=state["plan_key"], quantity=state["quantity"],
+              names=state["names"], original_price=original_price,
+              discount_code=code, discount_percent=disc["percent"])
+    bot.send_message(msg.chat.id,
+        f"✅ <b>کد تخفیف اعمال شد!</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏷️ کد: <code>{code}</code>\n"
+        f"💰 تخفیف: <b>{disc['percent']}٪</b>\n\n"
+        f"💵 قیمت قبل: <s>{fmt(original_price)}</s> تومان\n"
+        f"✅ قیمت بعد از تخفیف: <b>{fmt(new_price)} تومان</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💳 <b>{fmt(new_price)} تومان</b> واریز کنید."
+    )
+    updated_state = get_state(msg.from_user.id)
+    _create_order_and_notify(msg.from_user.id, msg.chat.id, updated_state, "card")
 
 # ─────────────────────────────────────────────
 #  ORDER CREATION
@@ -2034,7 +2134,7 @@ def _handle_surfshark_qr(msg):
 # ── Admin Surfshark Approve / Reject ───────────────
 @bot.callback_query_handler(func=lambda c: c.data.startswith("surf_ok_"))
 def cb_surf_approve(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     order_id = int(call.data[8:])
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -2093,7 +2193,7 @@ def cb_surf_approve(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("surf_done_"))
 def cb_surf_done(call):
     """ادمین بعد از اسکن QR، روی «تمام» می‌زند: رسید و عکس QR پاک می‌شوند و پیام فعال‌سازی برای کاربر ارسال می‌شود"""
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     order_id = int(call.data[10:])
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -2127,7 +2227,7 @@ def cb_surf_done(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("surf_rej_"))
 def cb_surf_reject(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     order_id = int(call.data[9:])
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -2148,7 +2248,7 @@ def cb_surf_reject(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("surf_qr_ok_"))
 def cb_surf_qr_ok(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     order_id = int(call.data[11:])
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -2183,7 +2283,7 @@ def cb_surf_qr_ok(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("surf_qr_rej_"))
 def cb_surf_qr_rej(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     order_id = int(call.data[12:])
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -2212,12 +2312,12 @@ def cb_surf_qr_rej(call):
 # ─────────────────────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_ok_"))
 def cb_admin_approve(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     order_id = int(call.data[7:]); bot.answer_callback_query(call.id)
     with get_db() as conn:
         order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
     qty = order["quantity"] if order else 1
-    set_state(ADMIN_ID, step="adm_config", order_id=order_id, configs=[], subs=[], expected_qty=qty)
+    set_state(call.from_user.id, step="adm_config", order_id=order_id, configs=[], subs=[], expected_qty=qty)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("✅ پایان و ارسال (/done)", callback_data=f"adm_done_{order_id}"))
     bot.send_message(call.message.chat.id,
@@ -2235,7 +2335,7 @@ def cb_admin_approve(call):
 def cb_adm_done(call):
     if call.from_user.id != ADMIN_ID: return
     order_id = int(call.data[9:])
-    state = get_state(ADMIN_ID)
+    state = get_state(call.from_user.id)
     if state.get("step") != "adm_config" or state.get("order_id") != order_id: return
     bot.answer_callback_query(call.id)
     configs = state.get("configs", []); subs = state.get("subs", [])
@@ -2243,14 +2343,14 @@ def cb_adm_done(call):
         return bot.send_message(call.message.chat.id, "⚠️ هیچ کانفیگی ثبت نشده است.")
     _deliver_configs(order_id, configs, subs)
     _delete_receipt_admin_msg(order_id)
-    clear_state(ADMIN_ID)
+    clear_state(call.from_user.id)
     bot.send_message(call.message.chat.id, f"✅ <b>{len(configs)} کانفیگ با موفقیت ارسال شد!</b>")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_rej_"))
 def cb_admin_reject(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     order_id = int(call.data[8:]); bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_rej_reason", order_id=order_id)
+    set_state(call.from_user.id, step="adm_rej_reason", order_id=order_id)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="menu_admin"))
     bot.send_message(call.message.chat.id,
@@ -2260,12 +2360,12 @@ def cb_admin_reject(call):
         reply_markup=kb
     )
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_rej_reason")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_rej_reason")
 def adm_rej_reason_handler(msg):
     reason = (msg.text or "").strip()
     if not reason: return bot.send_message(msg.chat.id, "⚠️ دلیل نمی‌تواند خالی باشد.")
-    state = get_state(ADMIN_ID); order_id = state.get("order_id")
-    clear_state(ADMIN_ID)
+    state = get_state(msg.from_user.id); order_id = state.get("order_id")
+    clear_state(msg.from_user.id)
     with get_db() as conn:
         order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
         conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (order_id,))
@@ -2292,21 +2392,21 @@ def _delete_receipt_admin_msg(order_id):
             safe_delete(ADMIN_ID, r["admin_msg_id"])
     except Exception: pass
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_config")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_config")
 def adm_receive_config(msg):
     if msg.text and msg.text.strip() == "/done":
-        state = get_state(ADMIN_ID); order_id = state["order_id"]
+        state = get_state(msg.from_user.id); order_id = state["order_id"]
         configs = state.get("configs", []); subs = state.get("subs", [])
         if not configs: return bot.send_message(msg.chat.id, "⚠️ هیچ کانفیگی ثبت نشده.")
         _deliver_configs(order_id, configs, subs)
         _delete_receipt_admin_msg(order_id)
-        clear_state(ADMIN_ID)
+        clear_state(msg.from_user.id)
         return bot.send_message(msg.chat.id, f"✅ <b>{len(configs)} کانفیگ ارسال شد.</b>")
-    state = get_state(ADMIN_ID); configs = state.get("configs", []); subs = state.get("subs", [])
+    state = get_state(msg.from_user.id); configs = state.get("configs", []); subs = state.get("subs", [])
     text = (msg.text or "").strip()
     if not text: return bot.send_message(msg.chat.id, "⚠️ متن خالی است.")
     if len(configs) == len(subs):
-        configs.append(text); set_state(ADMIN_ID, configs=configs)
+        configs.append(text); set_state(msg.from_user.id, configs=configs)
         bot.send_message(msg.chat.id,
             f"✅ <b>کانفیگ {len(configs)} ثبت شد.</b>\n\n"
             "📡 حالا ساب‌لینک این کانفیگ را ارسال کنید:\n"
@@ -2314,14 +2414,14 @@ def adm_receive_config(msg):
         )
     else:
         sub_text = text if text != "-" else ""
-        subs.append(sub_text); set_state(ADMIN_ID, subs=subs)
+        subs.append(sub_text); set_state(msg.from_user.id, subs=subs)
         expected = state.get("expected_qty", 999)
         if len(configs) >= expected:
             # همه سرویس‌ها ثبت شدن، ارسال خودکار
             order_id = state["order_id"]
             _deliver_configs(order_id, configs, subs)
             _delete_receipt_admin_msg(order_id)
-            clear_state(ADMIN_ID)
+            clear_state(msg.from_user.id)
             bot.send_message(msg.chat.id, f"✅ <b>همه {len(configs)} کانفیگ ارسال شد!</b>")
         else:
             bot.send_message(msg.chat.id,
@@ -2445,7 +2545,21 @@ def _show_my_services(chat_id, user_id):
     kb = types.InlineKeyboardMarkup(row_width=1)
     for svc in svcs:
         plan = PLANS.get(svc["plan_key"], {})
-        kb.add(types.InlineKeyboardButton(f"📦 {svc['service_name']}  |  {plan.get('gb','?')}GB", callback_data=f"vs_{svc['id']}"))
+        sub = svc["sub_link"] or ""
+        days_txt = ""
+        if sub.startswith("http"):
+            try:
+                info = get_sub_info(sub)
+                if info and info.get("remaining_days", 0) > 0:
+                    days_txt = f" | ⏳{info['remaining_days']}روز"
+                elif info and info.get("expire", 0) > 0:
+                    days_txt = " | ⏰منقضی"
+            except Exception:
+                pass
+        kb.add(types.InlineKeyboardButton(
+            f"📦 {svc['service_name']}  |  {plan.get('gb','?')}GB{days_txt}",
+            callback_data=f"vs_{svc['id']}"
+        ))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
     bot.send_message(chat_id,
         f"📦 <b>سرویس‌های من</b>\n\n"
@@ -2611,10 +2725,10 @@ def _handle_wallet_receipt(msg):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("wadm_ok_"))
 def cb_wallet_approve(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     parts = call.data.split("_"); req_id = int(parts[2]); user_id = int(parts[3]); amount = int(parts[4])
     bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="wadm_ok_reason", req_id=req_id, target_uid=user_id, wallet_amount=amount)
+    set_state(call.from_user.id, step="wadm_ok_reason", req_id=req_id, target_uid=user_id, wallet_amount=amount)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("⬛ بدون یادداشت", callback_data=f"wadm_ok_nonote_{req_id}_{user_id}_{amount}"))
     bot.send_message(call.message.chat.id,
@@ -2630,15 +2744,15 @@ def cb_wallet_approve_nonote(call):
     if call.from_user.id != ADMIN_ID: return
     parts = call.data.split("_"); req_id = int(parts[3]); user_id = int(parts[4]); amount = int(parts[5])
     bot.answer_callback_query(call.id)
-    clear_state(ADMIN_ID)
+    clear_state(call.from_user.id)
     _do_wallet_approve(call.message.chat.id, req_id, user_id, amount, "")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "wadm_ok_reason")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "wadm_ok_reason")
 def adm_wallet_approve_reason(msg):
     note = (msg.text or "").strip()
-    state = get_state(ADMIN_ID)
+    state = get_state(msg.from_user.id)
     req_id = state.get("req_id"); user_id = state.get("target_uid"); amount = state.get("wallet_amount")
-    clear_state(ADMIN_ID)
+    clear_state(msg.from_user.id)
     _do_wallet_approve(msg.chat.id, req_id, user_id, amount, note)
 
 def _do_wallet_approve(chat_id, req_id, user_id, amount, note):
@@ -2662,7 +2776,7 @@ def _do_wallet_approve(chat_id, req_id, user_id, amount, note):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("wadm_rej_"))
 def cb_wallet_reject(call):
-    if call.from_user.id != ADMIN_ID: return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     parts = call.data.split("_"); req_id = int(parts[2]); user_id = int(parts[3])
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -2706,7 +2820,9 @@ def _show_referral(chat_id, user_id):
 # ─────────────────────────────────────────────
 #  ⚙️ ADMIN PANEL (in-chat)
 # ─────────────────────────────────────────────
-def _show_admin_panel(chat_id):
+def _show_admin_panel(chat_id, caller_id=None):
+    if caller_id is None:
+        caller_id = ADMIN_ID
     bot_status = "🟢 روشن" if BOT_ONLINE else "🔴 خاموش"
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton("🌐 مدیریت نوع و پکیج‌ها", callback_data="ap_products"))
@@ -2730,6 +2846,9 @@ def _show_admin_panel(chat_id):
         types.InlineKeyboardButton("📋 رسیدهای بررسی نشده", callback_data="ap_pending"),
         types.InlineKeyboardButton("🚫 کاربران مسدود",       callback_data="ap_banned"),
     )
+    kb.add(types.InlineKeyboardButton("🏷️ کدهای تخفیف", callback_data="ap_discount_codes"))
+    if caller_id == ADMIN_ID:
+        kb.add(types.InlineKeyboardButton("👮 مدیریت ادمین‌ها", callback_data="ap_admins"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="start_back"))
     bot.send_message(chat_id,
         f"⚙️ <b>پنل مدیریت</b>\n\n"
@@ -2818,7 +2937,7 @@ def cb_remove_force_channel(call):
 
 
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_agency" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_agency" and is_admin(c.from_user.id))
 def cb_ap_agency(call):
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -2844,10 +2963,10 @@ def cb_ap_agency(call):
             reply_markup=adm_kb
         )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_broadcast" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_broadcast" and is_admin(c.from_user.id))
 def cb_ap_broadcast(call):
     bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_broadcast")
+    set_state(call.from_user.id, step="adm_broadcast")
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="menu_admin"))
     with get_db() as conn:
@@ -2862,12 +2981,12 @@ def cb_ap_broadcast(call):
         reply_markup=kb
     )
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_broadcast")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_broadcast")
 def adm_broadcast_send(msg):
     text = msg.text or msg.caption or ""
     if not text.strip():
         return bot.send_message(msg.chat.id, "⚠️ پیام نمی‌تواند خالی باشد.")
-    clear_state(ADMIN_ID)
+    clear_state(msg.from_user.id)
     with get_db() as conn:
         users = conn.execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
     success = 0; fail = 0
@@ -2886,7 +3005,7 @@ def adm_broadcast_send(msg):
         f"📊 <b>کل:</b> {success+fail} نفر"
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_settings" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_settings" and is_admin(c.from_user.id))
 def cb_ap_settings(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -2917,7 +3036,7 @@ def cb_ap_settings(call):
     )
 
 # ── پشتیبانی ─────────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_support" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_support" and is_admin(c.from_user.id))
 def cb_ap_support(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -2930,24 +3049,24 @@ def cb_ap_support(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_set_support" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_set_support" and is_admin(c.from_user.id))
 def cb_ap_set_support(call):
     bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_set_support")
+    set_state(call.from_user.id, step="adm_set_support")
     bot.send_message(call.message.chat.id,
         "🎧 یوزرنیم جدید پشتیبانی را ارسال کنید:\n\n"
         "<i>مثال: ViraNetSupport (بدون @)</i>"
     )
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_set_support")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_set_support")
 def adm_set_support(msg):
     val = (msg.text or "").strip().lstrip("@")
     if not val: return bot.send_message(msg.chat.id, "⚠️ یوزرنیم نمی‌تواند خالی باشد.")
-    save_setting("support_username", val); clear_state(ADMIN_ID)
+    save_setting("support_username", val); clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id, f"✅ یوزرنیم پشتیبانی به <b>@{val}</b> تغییر یافت.")
 
 # ── تست رایگان ───────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_free_trial" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_free_trial" and is_admin(c.from_user.id))
 def cb_ap_free_trial(call):
     bot.answer_callback_query(call.id)
     status = "✅ فعال" if FREE_TRIAL_ENABLED else "❌ غیرفعال"
@@ -2974,7 +3093,7 @@ def cb_ap_free_trial(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_toggle" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_toggle" and is_admin(c.from_user.id))
 def cb_ap_trial_toggle(call):
     bot.answer_callback_query(call.id)
     new_val = "0" if FREE_TRIAL_ENABLED else "1"
@@ -2982,39 +3101,39 @@ def cb_ap_trial_toggle(call):
     status = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
     bot.send_message(call.message.chat.id, f"🎁 تست رایگان {status} شد.")
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_days" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_days" and is_admin(c.from_user.id))
 def cb_ap_trial_days(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_trial_days")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_trial_days")
     bot.send_message(call.message.chat.id,
         f"📅 مدت فعلی: <b>{FREE_TRIAL_DAYS} روز</b>\n\n👇 تعداد روز جدید را وارد کنید:"
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_gb" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_gb" and is_admin(c.from_user.id))
 def cb_ap_trial_gb(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_trial_gb")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_trial_gb")
     bot.send_message(call.message.chat.id,
         f"📦 حجم فعلی: <b>{FREE_TRIAL_GB} گیگ</b>\n\n👇 حجم جدید (گیگابایت) را وارد کنید:"
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_config" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_config" and is_admin(c.from_user.id))
 def cb_ap_trial_config(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_trial_config")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_trial_config")
     bot.send_message(call.message.chat.id,
         "🔐 <b>کانفیگ تست رایگان</b>\n\n"
         "لینک یا کانفیگ ارسالی به کاربران در تست رایگان را وارد کنید:\n\n"
         "<i>مثال: vmess://... یا https://sub.domain.com/...</i>"
     )
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") in ("adm_trial_days","adm_trial_gb","adm_trial_config"))
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") in ("adm_trial_days","adm_trial_gb","adm_trial_config"))
 def adm_trial_settings(msg):
-    step = get_state(ADMIN_ID)["step"]; val = (msg.text or "").strip()
+    step = get_state(msg.from_user.id)["step"]; val = (msg.text or "").strip()
     if step == "adm_trial_days":
         try:
             d = int(val)
             if d <= 0: raise ValueError
         except ValueError:
             return bot.send_message(msg.chat.id, "⚠️ عدد معتبر وارد کنید.")
-        save_setting("free_trial_days", str(d)); clear_state(ADMIN_ID)
+        save_setting("free_trial_days", str(d)); clear_state(msg.from_user.id)
         bot.send_message(msg.chat.id, f"✅ مدت تست رایگان به <b>{d} روز</b> تغییر یافت.")
     elif step == "adm_trial_gb":
         try:
@@ -3022,17 +3141,17 @@ def adm_trial_settings(msg):
             if g <= 0: raise ValueError
         except ValueError:
             return bot.send_message(msg.chat.id, "⚠️ عدد معتبر وارد کنید.")
-        save_setting("free_trial_gb", str(g)); clear_state(ADMIN_ID)
+        save_setting("free_trial_gb", str(g)); clear_state(msg.from_user.id)
         bot.send_message(msg.chat.id, f"✅ حجم تست رایگان به <b>{g} گیگ</b> تغییر یافت.")
     elif step == "adm_trial_config":
         if not val: return bot.send_message(msg.chat.id, "⚠️ کانفیگ نمی‌تواند خالی باشد.")
-        save_setting("free_trial_config", val); clear_state(ADMIN_ID)
+        save_setting("free_trial_config", val); clear_state(msg.from_user.id)
         bot.send_message(msg.chat.id, "✅ کانفیگ تست رایگان ذخیره شد.")
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_sub" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_sub" and is_admin(c.from_user.id))
 def cb_ap_trial_sub(call):
     bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_trial_sub")
+    set_state(call.from_user.id, step="adm_trial_sub")
     cur_sub = FREE_TRIAL_SUB_LINK or "<i>تنظیم نشده</i>"
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton("🗑️ حذف ساب‌لینک", callback_data="ap_trial_sub_del"))
@@ -3050,14 +3169,14 @@ def cb_ap_trial_sub(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_sub_del" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_sub_del" and is_admin(c.from_user.id))
 def cb_ap_trial_sub_del(call):
     bot.answer_callback_query(call.id)
     save_setting("free_trial_sub_link", "")
-    clear_state(ADMIN_ID)
+    clear_state(call.from_user.id)
     bot.send_message(call.message.chat.id, "✅ ساب‌لینک تست رایگان حذف شد.")
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_check_sub" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_trial_check_sub" and is_admin(c.from_user.id))
 def cb_ap_trial_check_sub(call):
     bot.answer_callback_query(call.id, "⏳ در حال چک کردن...")
     if not FREE_TRIAL_SUB_LINK or not FREE_TRIAL_SUB_LINK.startswith("http"):
@@ -3081,13 +3200,13 @@ def cb_ap_trial_check_sub(call):
         + usage_text + auto_status
     )
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_trial_sub")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_trial_sub")
 def adm_trial_sub_input(msg):
     val = (msg.text or "").strip()
     if not val.startswith("http"):
         return bot.send_message(msg.chat.id, "⚠️ ساب‌لینک باید با http شروع شود.")
     save_setting("free_trial_sub_link", val)
-    clear_state(ADMIN_ID)
+    clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id,
         "✅ <b>ساب‌لینک تست رایگان ذخیره شد!</b>\n\n"
         f"<code>{html_lib.escape(val)}</code>\n\n"
@@ -3095,7 +3214,7 @@ def adm_trial_sub_input(msg):
     )
 
 # ── متن‌های ربات ─────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_bot_texts" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_bot_texts" and is_admin(c.from_user.id))
 def cb_ap_bot_texts(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -3110,24 +3229,24 @@ def cb_ap_bot_texts(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_set_welcome" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_set_welcome" and is_admin(c.from_user.id))
 def cb_ap_set_welcome(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_set_welcome")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_set_welcome")
     bot.send_message(call.message.chat.id,
         "👋 <b>متن خوش‌آمدگویی</b>\n\n"
         "متن جدید را ارسال کنید. HTML پشتیبانی می‌شود.\n\n"
         "<i>برای بازگشت به متن پیش‌فرض، کلمه «پیش‌فرض» را ارسال کنید.</i>"
     )
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_set_welcome")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_set_welcome")
 def adm_set_welcome(msg):
     val = (msg.text or "").strip()
     if val == "پیش‌فرض": val = ""
-    save_setting("welcome_text", val); clear_state(ADMIN_ID)
+    save_setting("welcome_text", val); clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id, "✅ متن خوش‌آمدگویی ذخیره شد!" if val else "✅ متن به پیش‌فرض بازگشت.")
 
 # ── چیدمان منو استارت ─────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_start_menu" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_start_menu" and is_admin(c.from_user.id))
 def cb_ap_start_menu(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -3143,7 +3262,7 @@ def cb_ap_start_menu(call):
     )
 
 # ── مدیریت فروش ──────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_sales_settings" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_sales_settings" and is_admin(c.from_user.id))
 def cb_ap_sales_settings(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -3160,26 +3279,26 @@ def cb_ap_sales_settings(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_set_referral" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_set_referral" and is_admin(c.from_user.id))
 def cb_ap_set_referral(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_set_referral")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_set_referral")
     bot.send_message(call.message.chat.id,
         f"🎁 پاداش فعلی معرفی: <b>{fmt(REFERRAL_BONUS)} تومان</b>\n\n"
         "👇 مبلغ جدید پاداش (تومان) را وارد کنید:"
     )
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_set_referral")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_set_referral")
 def adm_set_referral(msg):
     try:
         val = int((msg.text or "").strip().replace(",",""))
         if val < 0: raise ValueError
     except ValueError:
         return bot.send_message(msg.chat.id, "⚠️ مبلغ معتبر وارد کنید.")
-    save_setting("referral_bonus", str(val)); clear_state(ADMIN_ID)
+    save_setting("referral_bonus", str(val)); clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id, f"✅ پاداش معرفی به <b>{fmt(val)} تومان</b> تغییر یافت.")
 
 # ── لینک‌های دانلود اپلیکیشن ─────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_app_links" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_app_links" and is_admin(c.from_user.id))
 def cb_ap_app_links(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -3197,27 +3316,27 @@ def cb_ap_app_links(call):
         reply_markup=kb, disable_web_page_preview=True
     )
 
-@bot.callback_query_handler(func=lambda c: c.data in ("ap_set_ios","ap_set_android") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data in ("ap_set_ios","ap_set_android") and is_admin(c.from_user.id))
 def cb_ap_set_app_link(call):
     bot.answer_callback_query(call.id)
     plat = "iOS" if call.data == "ap_set_ios" else "اندروید"
     key  = "adm_set_ios" if call.data == "ap_set_ios" else "adm_set_android"
-    set_state(ADMIN_ID, step=key)
+    set_state(call.from_user.id, step=key)
     bot.send_message(call.message.chat.id, f"📲 لینک دانلود <b>{plat}</b> را ارسال کنید:")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") in ("adm_set_ios","adm_set_android"))
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") in ("adm_set_ios","adm_set_android"))
 def adm_set_app_link(msg):
-    step = get_state(ADMIN_ID)["step"]; url = (msg.text or "").strip()
+    step = get_state(msg.from_user.id)["step"]; url = (msg.text or "").strip()
     if not url.startswith("http"): return bot.send_message(msg.chat.id, "⚠️ لینک معتبر وارد کنید (باید با http شروع شود).")
     if step == "adm_set_ios":
-        save_setting("app_link_ios", url); clear_state(ADMIN_ID)
+        save_setting("app_link_ios", url); clear_state(msg.from_user.id)
         bot.send_message(msg.chat.id, "✅ لینک iOS ذخیره شد.")
     else:
-        save_setting("app_link_android", url); clear_state(ADMIN_ID)
+        save_setting("app_link_android", url); clear_state(msg.from_user.id)
         bot.send_message(msg.chat.id, "✅ لینک اندروید ذخیره شد.")
 
 # ── مدیریت عملیات ربات ───────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_bot_ops" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_bot_ops" and is_admin(c.from_user.id))
 def cb_ap_bot_ops(call):
     global BOT_ONLINE
     bot.answer_callback_query(call.id)
@@ -3235,7 +3354,7 @@ def cb_ap_bot_ops(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_toggle_bot" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_toggle_bot" and is_admin(c.from_user.id))
 def cb_ap_toggle_bot(call):
     global BOT_ONLINE
     BOT_ONLINE = not BOT_ONLINE
@@ -3244,7 +3363,7 @@ def cb_ap_toggle_bot(call):
     bot.send_message(call.message.chat.id, f"📡 وضعیت ربات → <b>{status}</b>")
 
 # ── مدیریت گروه ──────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_group" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_group" and is_admin(c.from_user.id))
 def cb_ap_group(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -3262,29 +3381,29 @@ def cb_ap_group(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_set_group" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_set_group" and is_admin(c.from_user.id))
 def cb_ap_set_group(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_set_group")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_set_group")
     bot.send_message(call.message.chat.id,
         "🏢 آیدی عددی یا یوزرنیم گروه را ارسال کنید:\n\n"
         "<i>مثال: @MyGroup یا -1001234567890</i>"
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_del_group" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_del_group" and is_admin(c.from_user.id))
 def cb_ap_del_group(call):
     bot.answer_callback_query(call.id)
     save_setting("group_id", "")
     bot.send_message(call.message.chat.id, "✅ گروه حذف شد.")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_set_group")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_set_group")
 def adm_set_group(msg):
     val = (msg.text or "").strip()
     if not val: return bot.send_message(msg.chat.id, "⚠️ مقدار نمی‌تواند خالی باشد.")
-    save_setting("group_id", val); clear_state(ADMIN_ID)
+    save_setting("group_id", val); clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id, f"✅ گروه به <code>{val}</code> تنظیم شد.")
 
 # ── مدیریت پنل VPN ───────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_vpn_panel" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_vpn_panel" and is_admin(c.from_user.id))
 def cb_ap_vpn_panel(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -3302,36 +3421,36 @@ def cb_ap_vpn_panel(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data in ("ap_set_panel_url","ap_set_panel_token") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data in ("ap_set_panel_url","ap_set_panel_token") and is_admin(c.from_user.id))
 def cb_ap_set_panel(call):
     bot.answer_callback_query(call.id)
     if call.data == "ap_set_panel_url":
-        set_state(ADMIN_ID, step="adm_set_panel_url")
+        set_state(call.from_user.id, step="adm_set_panel_url")
         bot.send_message(call.message.chat.id,
             "🌐 آدرس پنل را وارد کنید:\n\n"
             "<i>مثال: https://panel.example.com</i>"
         )
     else:
-        set_state(ADMIN_ID, step="adm_set_panel_token")
+        set_state(call.from_user.id, step="adm_set_panel_token")
         bot.send_message(call.message.chat.id,
             "🔑 توکن یا API Key پنل را وارد کنید:\n\n"
             "<i>این مقدار بصورت رمزگذاری شده ذخیره می‌شود.</i>"
         )
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") in ("adm_set_panel_url","adm_set_panel_token"))
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") in ("adm_set_panel_url","adm_set_panel_token"))
 def adm_set_panel(msg):
-    step = get_state(ADMIN_ID)["step"]; val = (msg.text or "").strip()
+    step = get_state(msg.from_user.id)["step"]; val = (msg.text or "").strip()
     if not val: return bot.send_message(msg.chat.id, "⚠️ مقدار نمی‌تواند خالی باشد.")
     if step == "adm_set_panel_url":
         if not val.startswith("http"): return bot.send_message(msg.chat.id, "⚠️ آدرس باید با http شروع شود.")
-        save_setting("panel_url", val); clear_state(ADMIN_ID)
+        save_setting("panel_url", val); clear_state(msg.from_user.id)
         bot.send_message(msg.chat.id, f"✅ آدرس پنل ذخیره شد:\n<code>{val}</code>")
     else:
-        save_setting("panel_token", val); clear_state(ADMIN_ID)
+        save_setting("panel_token", val); clear_state(msg.from_user.id)
         bot.send_message(msg.chat.id, "✅ توکن پنل ذخیره شد.")
 
 # ── مدیریت اعلان‌ها ───────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_notifications" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_notifications" and is_admin(c.from_user.id))
 def cb_ap_notifications(call):
     bot.answer_callback_query(call.id)
     u_icon = "✅" if NOTIFY_NEW_USER  else "❌"
@@ -3349,7 +3468,7 @@ def cb_ap_notifications(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data in ("ap_notif_user","ap_notif_order") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data in ("ap_notif_user","ap_notif_order") and is_admin(c.from_user.id))
 def cb_ap_toggle_notif(call):
     bot.answer_callback_query(call.id)
     if call.data == "ap_notif_user":
@@ -3364,7 +3483,7 @@ def cb_ap_toggle_notif(call):
         bot.send_message(call.message.chat.id, f"🔔 اعلان سفارش جدید: <b>{lbl}</b>")
 
 # ── تنظیمات Surfshark ────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_surfshark_settings" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_surfshark_settings" and is_admin(c.from_user.id))
 def cb_ap_surfshark_settings(call):
     bot.answer_callback_query(call.id)
     surf_icon = "✅" if SURFSHARK_ENABLED else "❌"
@@ -3385,7 +3504,7 @@ def cb_ap_surfshark_settings(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_toggle_surfshark" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_toggle_surfshark" and is_admin(c.from_user.id))
 def cb_ap_toggle_surfshark(call):
     bot.answer_callback_query(call.id)
     new_val = "0" if SURFSHARK_ENABLED else "1"
@@ -3393,7 +3512,7 @@ def cb_ap_toggle_surfshark(call):
     lbl = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
     bot.send_message(call.message.chat.id, f"🦈 Surfshark در فروشگاه: <b>{lbl}</b>")
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_toggle_v2ray" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_toggle_v2ray" and is_admin(c.from_user.id))
 def cb_ap_toggle_v2ray(call):
     bot.answer_callback_query(call.id)
     new_val = "0" if V2RAY_ENABLED else "1"
@@ -3401,16 +3520,16 @@ def cb_ap_toggle_v2ray(call):
     lbl = "✅ فعال" if new_val == "1" else "❌ غیرفعال"
     bot.send_message(call.message.chat.id, f"🔵 V2Ray در فروشگاه: <b>{lbl}</b>")
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_surf_price" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_surf_price" and is_admin(c.from_user.id))
 def cb_ap_surf_price(call):
     bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_surf_price")
+    set_state(call.from_user.id, step="adm_surf_price")
     bot.send_message(call.message.chat.id,
         f"💰 قیمت فعلی Surfshark یه ساله: <b>{fmt(SURFSHARK_1YEAR_PRICE)} تومان</b>\n\n"
         "👇 قیمت جدید را وارد کنید (تومان):"
     )
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_surf_price")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_surf_price")
 def adm_surf_price(msg):
     try:
         new_price = int((msg.text or "").strip().replace(",","").replace("٬",""))
@@ -3418,7 +3537,7 @@ def adm_surf_price(msg):
     except ValueError:
         return bot.send_message(msg.chat.id, "⚠️ قیمت معتبر وارد کنید.")
     save_setting("surfshark_1year_price", str(new_price))
-    clear_state(ADMIN_ID)
+    clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id, f"✅ قیمت Surfshark یه ساله به <b>{fmt(new_price)} تومان</b> تغییر یافت.")
 
 # ── رسیدهای قبلی Surfshark ────────────────────────
@@ -3452,12 +3571,12 @@ def _show_surf_receipts_list(chat_id, page=0):
     kb.add(types.InlineKeyboardButton("🔙 تنظیمات Surfshark", callback_data="ap_surfshark_settings"))
     bot.send_message(chat_id, f"📋 <b>رسیدهای Surfshark</b> ({total} سفارش) — صفحه {page+1}:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_surf_receipts" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_surf_receipts" and is_admin(c.from_user.id))
 def cb_ap_surf_receipts(call):
     bot.answer_callback_query(call.id)
     _show_surf_receipts_list(call.message.chat.id, 0)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_surf_receipts_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_surf_receipts_") and is_admin(c.from_user.id))
 def cb_ap_surf_receipts_page(call):
     bot.answer_callback_query(call.id)
     page = int(call.data[len("ap_surf_receipts_"):])
@@ -3488,30 +3607,30 @@ def _resend_surf_order(chat_id, order_id):
     if order["qr_file_id"]:
         bot.send_photo(chat_id, order["qr_file_id"], caption=f"📸 QR کد سفارش #{code}")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_surf_view_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_surf_view_") and is_admin(c.from_user.id))
 def cb_ap_surf_view(call):
     bot.answer_callback_query(call.id)
     order_id = int(call.data[len("ap_surf_view_"):])
     _resend_surf_order(call.message.chat.id, order_id)
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_surf_search" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_surf_search" and is_admin(c.from_user.id))
 def cb_ap_surf_search(call):
     bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_surf_search")
+    set_state(call.from_user.id, step="adm_surf_search")
     bot.send_message(call.message.chat.id, "🔍 شماره سفارش (۸ رقمی) را ارسال کنید:")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_surf_search")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_surf_search")
 def adm_surf_search(msg):
     code = (msg.text or "").strip()
     with get_db() as conn:
         order = conn.execute("SELECT * FROM surfshark_orders WHERE order_code=?", (code,)).fetchone()
     if not order:
         return bot.send_message(msg.chat.id, "❌ سفارشی با این شماره یافت نشد.")
-    clear_state(ADMIN_ID)
+    clear_state(msg.from_user.id)
     _resend_surf_order(msg.chat.id, order["id"])
 
 # ── روش‌های پرداخت ────────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_payment_methods" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_payment_methods" and is_admin(c.from_user.id))
 def cb_ap_payment_methods(call):
     bot.answer_callback_query(call.id)
     card_icon   = "✅" if PAYMENT_CARD_ENABLED   else "❌"
@@ -3529,7 +3648,7 @@ def cb_ap_payment_methods(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data in ("ap_toggle_card_pay","ap_toggle_crypto_pay") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data in ("ap_toggle_card_pay","ap_toggle_crypto_pay") and is_admin(c.from_user.id))
 def cb_ap_toggle_payment(call):
     bot.answer_callback_query(call.id)
     if call.data == "ap_toggle_card_pay":
@@ -3544,7 +3663,7 @@ def cb_ap_toggle_payment(call):
         bot.send_message(call.message.chat.id, f"🔷 ترون (TRX): <b>{lbl}</b>")
 
 # ── پاکسازی داده‌ها ───────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_cleanup" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_cleanup" and is_admin(c.from_user.id))
 def cb_ap_cleanup(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -3564,7 +3683,7 @@ def cb_ap_cleanup(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data in ("ap_clean_receipts","ap_clean_orders") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data in ("ap_clean_receipts","ap_clean_orders") and is_admin(c.from_user.id))
 def cb_ap_clean(call):
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -3578,7 +3697,7 @@ def cb_ap_clean(call):
             bot.send_message(call.message.chat.id, f"✅ <b>{n} سفارش</b> قدیمی حذف شد.")
 
 # ── کاربران مسدود ─────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_banned" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_banned" and is_admin(c.from_user.id))
 def cb_ap_banned(call):
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -3599,7 +3718,7 @@ def cb_ap_banned(call):
     )
 
 # ── آمار فروش ─────────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_sales" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_sales" and is_admin(c.from_user.id))
 def cb_ap_sales(call):
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -3636,7 +3755,7 @@ def cb_ap_sales(call):
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_card_settings" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_card_settings" and is_admin(c.from_user.id))
 def cb_ap_card_settings(call):
     bot.answer_callback_query(call.id)
     kb = types.InlineKeyboardMarkup(row_width=1)
@@ -3655,25 +3774,25 @@ def cb_ap_card_settings(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_change_card" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_change_card" and is_admin(c.from_user.id))
 def cb_ap_change_card(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_change_card")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_change_card")
     bot.send_message(call.message.chat.id, f"💳 شماره کارت فعلی: <code>{CARD_NUMBER}</code>\n\n👇 شماره کارت جدید را ارسال کنید:")
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_change_owner" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_change_owner" and is_admin(c.from_user.id))
 def cb_ap_change_owner(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_change_owner")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_change_owner")
     bot.send_message(call.message.chat.id, f"👤 نام فعلی: <b>{CARD_OWNER}</b>\n\n👇 نام جدید را ارسال کنید:")
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_change_wallet" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_change_wallet" and is_admin(c.from_user.id))
 def cb_ap_change_wallet(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_change_wallet")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_change_wallet")
     bot.send_message(call.message.chat.id, f"🔷 آدرس فعلی: <code>{TRX_WALLET}</code>\n\n👇 آدرس جدید را ارسال کنید:")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") in ("adm_change_card","adm_change_owner","adm_change_wallet"))
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") in ("adm_change_card","adm_change_owner","adm_change_wallet"))
 def adm_change_settings(msg):
     global CARD_NUMBER, CARD_OWNER, TRX_WALLET
-    step = get_state(ADMIN_ID)["step"]; value = (msg.text or "").strip()
+    step = get_state(msg.from_user.id)["step"]; value = (msg.text or "").strip()
     if not value: return bot.send_message(msg.chat.id, "⚠️ مقدار خالی!")
     if step == "adm_change_card":
         CARD_NUMBER = value; save_setting("card_number", value)
@@ -3684,10 +3803,10 @@ def adm_change_settings(msg):
     elif step == "adm_change_wallet":
         TRX_WALLET = value; save_setting("trx_wallet", value)
         bot.send_message(msg.chat.id, f"✅ آدرس ولت به <code>{value}</code> تغییر یافت.")
-    clear_state(ADMIN_ID)
+    clear_state(msg.from_user.id)
 
 # ── Products ─────────────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_products" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_products" and is_admin(c.from_user.id))
 def cb_ap_products(call):
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -3702,7 +3821,7 @@ def cb_ap_products(call):
     kb.add(types.InlineKeyboardButton("🔙 تنظیمات",    callback_data="ap_settings"))
     bot.send_message(call.message.chat.id, "📦 <b>محصولات</b>\n\nبرای ویرایش روی محصول بزنید:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_prod_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_prod_") and is_admin(c.from_user.id))
 def cb_ap_prod(call):
     bot.answer_callback_query(call.id)
     prod_id = int(call.data[8:])
@@ -3726,7 +3845,7 @@ def cb_ap_prod(call):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_toggle_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_toggle_") and is_admin(c.from_user.id))
 def cb_ap_toggle(call):
     prod_id = int(call.data[10:]); bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -3736,10 +3855,10 @@ def cb_ap_toggle(call):
     reload_plans()
     bot.send_message(call.message.chat.id, f"✅ وضعیت محصول {'فعال' if new_status else 'غیرفعال'} شد.")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_chprice_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_chprice_") and is_admin(c.from_user.id))
 def cb_ap_chprice(call):
     prod_id = int(call.data[11:]); bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_change_price", prod_id=prod_id)
+    set_state(call.from_user.id, step="adm_change_price", prod_id=prod_id)
     with get_db() as conn:
         p = conn.execute("SELECT * FROM products WHERE id=?", (prod_id,)).fetchone()
     bot.send_message(call.message.chat.id,
@@ -3747,10 +3866,10 @@ def cb_ap_chprice(call):
         "👇 قیمت جدید را وارد کنید:"
     )
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_chname_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_chname_") and is_admin(c.from_user.id))
 def cb_ap_chname(call):
     prod_id = int(call.data[10:]); bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_change_pname", prod_id=prod_id)
+    set_state(call.from_user.id, step="adm_change_pname", prod_id=prod_id)
     with get_db() as conn:
         p = conn.execute("SELECT * FROM products WHERE id=?", (prod_id,)).fetchone()
     bot.send_message(call.message.chat.id,
@@ -3758,73 +3877,73 @@ def cb_ap_chname(call):
         "👇 نام جدید را وارد کنید:"
     )
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_change_price")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_change_price")
 def adm_change_price(msg):
     try:
         new_price = int((msg.text or "").strip().replace(",","").replace("٬",""))
         if new_price <= 0: raise ValueError
     except ValueError:
         return bot.send_message(msg.chat.id, "⚠️ قیمت معتبر وارد کنید.")
-    prod_id = get_state(ADMIN_ID)["prod_id"]
+    prod_id = get_state(msg.from_user.id)["prod_id"]
     with get_db() as conn:
         p = conn.execute("SELECT * FROM products WHERE id=?", (prod_id,)).fetchone()
         new_label = _make_label(p["gb"], p["days"], new_price)
         conn.execute("UPDATE products SET price=?, label=? WHERE id=?", (new_price, new_label, prod_id)); conn.commit()
-    reload_plans(); clear_state(ADMIN_ID)
+    reload_plans(); clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id, f"✅ قیمت تغییر یافت!\n\n{new_label}")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_change_pname")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_change_pname")
 def adm_change_pname(msg):
     new_label = (msg.text or "").strip()
     if len(new_label) < 3: return bot.send_message(msg.chat.id, "⚠️ نام باید حداقل ۳ کاراکتر باشد.")
-    prod_id = get_state(ADMIN_ID)["prod_id"]
+    prod_id = get_state(msg.from_user.id)["prod_id"]
     with get_db() as conn:
         conn.execute("UPDATE products SET label=? WHERE id=?", (new_label, prod_id)); conn.commit()
-    reload_plans(); clear_state(ADMIN_ID)
+    reload_plans(); clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id, f"✅ نام محصول تغییر یافت!\n\n<b>{new_label}</b>")
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_product_add" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_product_add" and is_admin(c.from_user.id))
 def cb_ap_product_add(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_add_product_gb")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_add_product_gb")
     bot.send_message(call.message.chat.id, "➕ <b>محصول جدید</b>\n\n📊 حجم (گیگابایت):")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_add_product_gb")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_add_product_gb")
 def adm_add_gb(msg):
     try:
         gb = int((msg.text or "").strip())
         if gb <= 0: raise ValueError
     except ValueError:
         return bot.send_message(msg.chat.id, "⚠️ عدد معتبر وارد کنید.")
-    set_state(ADMIN_ID, step="adm_add_product_days", new_gb=gb)
+    set_state(msg.from_user.id, step="adm_add_product_days", new_gb=gb)
     bot.send_message(msg.chat.id, f"✅ حجم: {gb}GB\n\n📅 مدت (روز):")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_add_product_days")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_add_product_days")
 def adm_add_days(msg):
     try:
         days = int((msg.text or "").strip())
         if days <= 0: raise ValueError
     except ValueError:
         return bot.send_message(msg.chat.id, "⚠️ عدد معتبر وارد کنید.")
-    set_state(ADMIN_ID, step="adm_add_product_price", new_days=days)
+    set_state(msg.from_user.id, step="adm_add_product_price", new_days=days)
     bot.send_message(msg.chat.id, f"✅ مدت: {days} روز\n\n💰 قیمت (تومان):")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_add_product_price")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_add_product_price")
 def adm_add_price(msg):
     try:
         price = int((msg.text or "").strip().replace(",","").replace("٬",""))
         if price <= 0: raise ValueError
     except ValueError:
         return bot.send_message(msg.chat.id, "⚠️ قیمت معتبر وارد کنید.")
-    state = get_state(ADMIN_ID); gb = state["new_gb"]; days = state["new_days"]
+    state = get_state(msg.from_user.id); gb = state["new_gb"]; days = state["new_days"]
     label    = _make_label(gb, days, price)
     plan_key = f"prod_{int(time.time())}"
     with get_db() as conn:
         conn.execute("INSERT INTO products(plan_key,label,gb,days,price) VALUES(?,?,?,?,?)", (plan_key, label, gb, days, price)); conn.commit()
-    reload_plans(); clear_state(ADMIN_ID)
+    reload_plans(); clear_state(msg.from_user.id)
     bot.send_message(msg.chat.id, f"✅ <b>محصول اضافه شد!</b>\n\n{label}")
 
 # ── User management ─────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data == "ap_stats" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_stats" and is_admin(c.from_user.id))
 def cb_ap_stats(call):
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -3842,7 +3961,7 @@ def cb_ap_stats(call):
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_users_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_users_") and is_admin(c.from_user.id))
 def cb_ap_users(call):
     bot.answer_callback_query(call.id)
     page = int(call.data[9:]); limit = 8; offset = page * limit
@@ -3861,12 +3980,12 @@ def cb_ap_users(call):
     kb.add(types.InlineKeyboardButton("🔙 پنل ادمین", callback_data="menu_admin"))
     bot.send_message(call.message.chat.id, f"👥 <b>کاربران</b> ({total}) — صفحه {page+1}:", reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_search" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_search" and is_admin(c.from_user.id))
 def cb_ap_search(call):
-    bot.answer_callback_query(call.id); set_state(ADMIN_ID, step="adm_search")
+    bot.answer_callback_query(call.id); set_state(call.from_user.id, step="adm_search")
     bot.send_message(call.message.chat.id, "🔍 آیدی یا یوزرنیم کاربر را ارسال کنید:")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_search")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_search")
 def adm_search(msg):
     q = msg.text.strip().lstrip("@")
     with get_db() as conn:
@@ -3874,9 +3993,9 @@ def adm_search(msg):
              or conn.execute("SELECT * FROM users WHERE username LIKE ?", (f"%{q}%",)).fetchone()
              or conn.execute("SELECT * FROM users WHERE full_name LIKE ?", (f"%{q}%",)).fetchone())
     if not u: return bot.send_message(msg.chat.id, "❌ کاربر یافت نشد.")
-    clear_state(ADMIN_ID); _show_user_detail(msg.chat.id, u["user_id"])
+    clear_state(msg.from_user.id); _show_user_detail(msg.chat.id, u["user_id"])
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_user_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_user_") and is_admin(c.from_user.id))
 def cb_ap_user(call):
     bot.answer_callback_query(call.id); _show_user_detail(call.message.chat.id, int(call.data[8:]))
 
@@ -3907,35 +4026,35 @@ def _show_user_detail(chat_id, uid):
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_add_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_add_") and is_admin(c.from_user.id))
 def cb_ap_add(call):
     uid = int(call.data[7:]); bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_add_wallet", target_uid=uid)
+    set_state(call.from_user.id, step="adm_add_wallet", target_uid=uid)
     bot.send_message(call.message.chat.id, f"💰 مبلغ شارژ برای <code>{uid}</code> را وارد کنید:")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_sub_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_sub_") and is_admin(c.from_user.id))
 def cb_ap_sub(call):
     uid = int(call.data[7:]); bot.answer_callback_query(call.id)
-    set_state(ADMIN_ID, step="adm_sub_wallet", target_uid=uid)
+    set_state(call.from_user.id, step="adm_sub_wallet", target_uid=uid)
     bot.send_message(call.message.chat.id, f"➖ مبلغ کسر از کیف پول <code>{uid}</code> را وارد کنید:")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") in ("adm_add_wallet","adm_sub_wallet"))
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") in ("adm_add_wallet","adm_sub_wallet"))
 def adm_modify_wallet(msg):
     try:
         amount = int(msg.text.strip().replace(",",""))
         if amount <= 0: raise ValueError
     except ValueError:
         return bot.send_message(msg.chat.id, "⚠️ مبلغ معتبر وارد کنید.")
-    state = get_state(ADMIN_ID); uid = state["target_uid"]; action = state["step"]
+    state = get_state(msg.from_user.id); uid = state["target_uid"]; action = state["step"]
     if action == "adm_add_wallet":
         add_wallet(uid, amount)
         try: bot.send_message(uid, f"✅ {fmt(amount)} تومان به کیف پولتان اضافه شد!\n💎 موجودی: {fmt(get_wallet(uid))} تومان")
         except Exception: pass
         bot.send_message(msg.chat.id, f"✅ {fmt(amount)} تومان اضافه شد. موجودی: {fmt(get_wallet(uid))}")
-        clear_state(ADMIN_ID)
+        clear_state(msg.from_user.id)
     else:
         # Ask for reason before deducting
-        set_state(ADMIN_ID, step="adm_sub_reason", sub_amount=amount)
+        set_state(msg.from_user.id, step="adm_sub_reason", sub_amount=amount)
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("⬛ بدون دلیل", callback_data=f"adm_sub_noreason_{uid}_{amount}"))
         bot.send_message(msg.chat.id,
@@ -3945,17 +4064,17 @@ def adm_modify_wallet(msg):
             reply_markup=kb
         )
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_sub_noreason_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_sub_noreason_") and is_admin(c.from_user.id))
 def cb_sub_noreason(call):
     parts = call.data.split("_"); uid = int(parts[3]); amount = int(parts[4])
-    bot.answer_callback_query(call.id); clear_state(ADMIN_ID)
+    bot.answer_callback_query(call.id); clear_state(call.from_user.id)
     _do_wallet_deduct(call.message.chat.id, uid, amount, "")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(ADMIN_ID).get("step") == "adm_sub_reason")
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_sub_reason")
 def adm_sub_reason_handler(msg):
     reason = (msg.text or "").strip()
-    state = get_state(ADMIN_ID); uid = state.get("target_uid"); amount = state.get("sub_amount")
-    clear_state(ADMIN_ID)
+    state = get_state(msg.from_user.id); uid = state.get("target_uid"); amount = state.get("sub_amount")
+    clear_state(msg.from_user.id)
     _do_wallet_deduct(msg.chat.id, uid, amount, reason)
 
 def _do_wallet_deduct(chat_id, uid, amount, reason):
@@ -3969,7 +4088,7 @@ def _do_wallet_deduct(chat_id, uid, amount, reason):
     except Exception: pass
     bot.send_message(chat_id, f"➖ {fmt(dec)} تومان کسر شد. موجودی: {fmt(get_wallet(uid))}")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_ban_") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_ban_") and is_admin(c.from_user.id))
 def cb_ap_ban(call):
     uid = int(call.data[7:]); bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -3982,7 +4101,7 @@ def cb_ap_ban(call):
         try: bot.send_message(uid, "⛔ حساب شما مسدود شده است.")
         except Exception: pass
 
-@bot.callback_query_handler(func=lambda c: c.data == "ap_pending" and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data == "ap_pending" and is_admin(c.from_user.id))
 def cb_ap_pending(call):
     bot.answer_callback_query(call.id)
     with get_db() as conn:
@@ -4026,7 +4145,7 @@ def cb_ap_pending(call):
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="menu_admin"))
     bot.send_message(call.message.chat.id, text, reply_markup=kb)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("pv__") and c.from_user.id == ADMIN_ID)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pv__") and is_admin(c.from_user.id))
 def cb_pending_view_item(call):
     bot.answer_callback_query(call.id)
     parts = call.data[4:].split("_", 1)  # pv__p_123 → ['p', '123']
@@ -4827,6 +4946,352 @@ def _trial_sub_monitor():
             print(f"[trial_monitor] {e}")
 
 # ─────────────────────────────────────────────
+#  اعلان انقضای سرویس (۱ ساله / V2Ray)
+# ─────────────────────────────────────────────
+def _expiry_notification_monitor():
+    """هر ساعت یکبار چک می‌کند آیا سرویسی منقضی شده یا نزدیک انقضاست"""
+    while True:
+        time.sleep(3600)
+        try:
+            _check_expiry_notifications()
+        except Exception as e:
+            print(f"[expiry_monitor] {e}")
+
+def _check_expiry_notifications():
+    """چک می‌کند سرویس‌هایی که ساب‌لینک دارند و نزدیک انقضا هستند"""
+    with get_db() as conn:
+        svcs = conn.execute(
+            "SELECT os.*, u.user_id FROM order_services os "
+            "JOIN users u ON os.user_id = u.user_id "
+            "WHERE os.sub_link IS NOT NULL AND os.sub_link != '' "
+            "AND os.config_text IS NOT NULL"
+        ).fetchall()
+    for svc in svcs:
+        try:
+            sub = svc["sub_link"] or ""
+            if not sub.startswith("http"):
+                continue
+            info = get_sub_info(sub)
+            if not info:
+                continue
+            remaining_days = info.get("remaining_days", 999)
+            uid = svc["user_id"]
+            svc_id = svc["id"]
+            # اگه کمتر از ۳ روز مانده، اعلان بده
+            if remaining_days <= 3:
+                with get_db() as conn:
+                    already = conn.execute(
+                        "SELECT 1 FROM expiry_notified WHERE user_id=? AND svc_id=? "
+                        "AND date(notified_at) >= date('now', '-7 days')",
+                        (uid, svc_id)
+                    ).fetchone()
+                if not already:
+                    try:
+                        msg = (
+                            f"⚠️ <b>سرویس شما در حال انقضاست!</b>\n\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                            f"🏷️ <b>سرویس:</b> {html_lib.escape(svc['service_name'])}\n"
+                            f"⏳ <b>زمان باقی‌مانده:</b> {remaining_days} روز\n\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                            f"💡 برای تمدید سرویس از فروشگاه اقدام کنید.\n\n"
+                            f"🛒 /start"
+                        )
+                        bot.send_message(uid, msg)
+                        with get_db() as conn:
+                            conn.execute(
+                                "INSERT OR REPLACE INTO expiry_notified(user_id, svc_id) VALUES(?,?)",
+                                (uid, svc_id)
+                            )
+                            conn.commit()
+                    except Exception as e:
+                        print(f"[expiry_notify] {e}")
+        except Exception as e:
+            print(f"[expiry_check svc {svc.get('id','')}] {e}")
+
+# ─────────────────────────────────────────────
+#  پیام دلتنگی (۳۰ روز بدون خرید)
+# ─────────────────────────────────────────────
+def _winback_monitor():
+    """هر روز یک بار کاربرانی که ۳۰ روز خرید نکرده‌اند را پیام می‌دهد"""
+    while True:
+        time.sleep(86400)
+        try:
+            _send_winback_messages()
+        except Exception as e:
+            print(f"[winback_monitor] {e}")
+
+def _send_winback_messages():
+    with get_db() as conn:
+        # کاربرانی که ۳۰+ روز خرید نکرده‌اند
+        users = conn.execute("""
+            SELECT u.user_id, u.full_name FROM users u
+            WHERE u.is_banned=0
+            AND (
+                (SELECT MAX(created_at) FROM orders WHERE user_id=u.user_id AND status='delivered')
+                < datetime('now', '-30 days')
+                OR
+                (SELECT COUNT(*) FROM orders WHERE user_id=u.user_id AND status='delivered') = 0
+            )
+            AND u.joined_at < datetime('now', '-30 days')
+        """).fetchall()
+    
+    # یک کد تخفیف ۱۵ درصدی برای دلتنگی
+    discount_code = "BACK" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    with get_db() as conn:
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO discount_codes(code, percent) VALUES(?,?)",
+                (discount_code, 15)
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+    for u in users:
+        try:
+            name = (u["full_name"] or "دوست عزیز").split()[0]
+            bot.send_message(u["user_id"],
+                f"💙 <b>دلتنگت شدیم {name}!</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "مدتیه که ازت خبری نیست... 😢\n\n"
+                "🎁 یه کد تخفیف ویژه برات آماده کردیم:\n\n"
+                f"🏷️ کد تخفیف: <code>{discount_code}</code>\n"
+                f"💰 <b>۱۵٪ تخفیف</b> روی همه سرویس‌ها\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "👇 برای استفاده از تخفیف:\n"
+                "  ۱. به فروشگاه بزنید\n"
+                "  ۲. روش پرداخت «کارت به کارت» رو انتخاب کنید\n"
+                "  ۳. کد تخفیف رو وارد کنید!\n\n"
+                "🛒 /start"
+            )
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"[winback] {e}")
+
+# ─────────────────────────────────────────────
+#  کدهای تخفیف
+# ─────────────────────────────────────────────
+def get_discount(code):
+    if not code:
+        return None
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT * FROM discount_codes WHERE code=? AND active=1",
+            (code.strip().upper(),)
+        ).fetchone()
+
+def apply_discount(price, percent):
+    return int(price * (100 - percent) / 100)
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_discount_codes" and is_admin(c.from_user.id))
+def cb_ap_discount_codes(call):
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        codes = conn.execute("SELECT * FROM discount_codes ORDER BY id DESC LIMIT 20").fetchall()
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("➕ ساخت کد تخفیف", callback_data="ap_create_discount"))
+    for c in codes:
+        status = "✅" if c["active"] else "❌"
+        kb.add(types.InlineKeyboardButton(
+            f"{status} {c['code']} — {c['percent']}٪",
+            callback_data=f"ap_disc_{c['id']}"
+        ))
+    kb.add(types.InlineKeyboardButton("🔙 پنل ادمین", callback_data="menu_admin"))
+    bot.send_message(call.message.chat.id,
+        "🏷️ <b>کدهای تخفیف</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 برای مدیریت روی کد بزنید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_create_discount" and is_admin(c.from_user.id))
+def cb_ap_create_discount(call):
+    bot.answer_callback_query(call.id)
+    set_state(call.from_user.id, step="adm_discount_code")
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="ap_discount_codes"))
+    bot.send_message(call.message.chat.id,
+        "🏷️ <b>ساخت کد تخفیف</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "کلمه‌ای که می‌خواید کد تخفیف بشه رو بنویسید:\n\n"
+        "<i>مثال: SUMMER یا VIP2024</i>",
+        reply_markup=kb
+    )
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_discount_code")
+def adm_discount_code_input(msg):
+    code = (msg.text or "").strip().upper()
+    if not code or len(code) < 3:
+        return bot.send_message(msg.chat.id, "⚠️ کد باید حداقل ۳ کاراکتر باشد.")
+    set_state(msg.from_user.id, step="adm_discount_percent", discount_code=code)
+    bot.send_message(msg.chat.id,
+        f"✅ کد: <b>{code}</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "حالا درصد تخفیف را وارد کنید:\n\n"
+        "<i>مثال: ۱۰ یا ۲۰ (بین ۱ تا ۱۰۰)</i>"
+    )
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_discount_percent")
+def adm_discount_percent_input(msg):
+    try:
+        percent = int((msg.text or "").strip())
+        if percent < 1 or percent > 100:
+            raise ValueError
+    except ValueError:
+        return bot.send_message(msg.chat.id, "⚠️ عدد بین ۱ تا ۱۰۰ وارد کنید.")
+    state = get_state(msg.from_user.id)
+    code = state.get("discount_code", "")
+    with get_db() as conn:
+        try:
+            conn.execute("INSERT INTO discount_codes(code, percent) VALUES(?,?)", (code, percent))
+            conn.commit()
+            clear_state(msg.from_user.id)
+            bot.send_message(msg.chat.id,
+                f"✅ <b>کد تخفیف ساخته شد!</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🏷️ <b>کد:</b> <code>{code}</code>\n"
+                f"💰 <b>تخفیف:</b> {percent}٪\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"این کد را به مشتریان بدهید."
+            )
+        except Exception:
+            clear_state(msg.from_user.id)
+            bot.send_message(msg.chat.id, "❌ این کد قبلاً وجود دارد.")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_disc_") and is_admin(c.from_user.id))
+def cb_ap_disc_view(call):
+    bot.answer_callback_query(call.id)
+    disc_id = int(call.data[8:])
+    with get_db() as conn:
+        d = conn.execute("SELECT * FROM discount_codes WHERE id=?", (disc_id,)).fetchone()
+    if not d:
+        return
+    status = "✅ فعال" if d["active"] else "❌ غیرفعال"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    toggle_lbl = "❌ غیرفعال کردن" if d["active"] else "✅ فعال کردن"
+    kb.add(types.InlineKeyboardButton(toggle_lbl, callback_data=f"ap_disc_tog_{disc_id}"))
+    kb.add(types.InlineKeyboardButton("🗑️ حذف", callback_data=f"ap_disc_del_{disc_id}"))
+    kb.add(types.InlineKeyboardButton("🔙 کدهای تخفیف", callback_data="ap_discount_codes"))
+    bot.send_message(call.message.chat.id,
+        f"🏷️ <b>کد تخفیف</b>\n\n"
+        f"کد: <code>{d['code']}</code>\n"
+        f"تخفیف: <b>{d['percent']}٪</b>\n"
+        f"وضعیت: {status}\n"
+        f"ساخته شده: {d['created_at'][:16]}",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_disc_tog_") and is_admin(c.from_user.id))
+def cb_ap_disc_toggle(call):
+    bot.answer_callback_query(call.id)
+    disc_id = int(call.data[12:])
+    with get_db() as conn:
+        d = conn.execute("SELECT active FROM discount_codes WHERE id=?", (disc_id,)).fetchone()
+        new_val = 0 if d["active"] else 1
+        conn.execute("UPDATE discount_codes SET active=? WHERE id=?", (new_val, disc_id))
+        conn.commit()
+    lbl = "✅ فعال" if new_val else "❌ غیرفعال"
+    bot.send_message(call.message.chat.id, f"کد تخفیف {lbl} شد.")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_disc_del_") and is_admin(c.from_user.id))
+def cb_ap_disc_del(call):
+    bot.answer_callback_query(call.id)
+    disc_id = int(call.data[12:])
+    with get_db() as conn:
+        conn.execute("DELETE FROM discount_codes WHERE id=?", (disc_id,))
+        conn.commit()
+    bot.send_message(call.message.chat.id, "🗑️ کد تخفیف حذف شد.")
+
+# ─────────────────────────────────────────────
+#  مدیریت ادمین‌ها (فقط ادمین اصلی)
+# ─────────────────────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data == "ap_admins" and c.from_user.id == ADMIN_ID)
+def cb_ap_admins(call):
+    bot.answer_callback_query(call.id)
+    admins = get_all_admins()
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("➕ افزودن ادمین", callback_data="ap_admin_add"))
+    for a in admins:
+        u = get_user(a["user_id"])
+        name = (u["username"] or u["full_name"] or str(a["user_id"])) if u else str(a["user_id"])
+        kb.add(types.InlineKeyboardButton(
+            f"👮 {name} | {a['user_id']}",
+            callback_data=f"ap_admin_view_{a['user_id']}"
+        ))
+    kb.add(types.InlineKeyboardButton("🔙 پنل ادمین", callback_data="menu_admin"))
+    text = f"👮 <b>مدیریت ادمین‌ها</b>\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    text += f"👑 ادمین اصلی: <code>{ADMIN_ID}</code>\n\n"
+    if admins:
+        text += f"👮 ادمین‌های فرعی: {len(admins)} نفر"
+    else:
+        text += "❌ ادمین فرعی ندارید"
+    bot.send_message(call.message.chat.id, text, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data == "ap_admin_add" and c.from_user.id == ADMIN_ID)
+def cb_ap_admin_add(call):
+    bot.answer_callback_query(call.id)
+    set_state(call.from_user.id, step="adm_add_admin")
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data="ap_admins"))
+    bot.send_message(call.message.chat.id,
+        "👮 <b>افزودن ادمین</b>\n\n"
+        "آیدی عددی کاربر مورد نظر را وارد کنید:\n\n"
+        "<i>مثال: 123456789</i>",
+        reply_markup=kb
+    )
+
+@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and get_state(m.from_user.id).get("step") == "adm_add_admin")
+def adm_add_admin_input(msg):
+    try:
+        new_uid = int((msg.text or "").strip())
+    except ValueError:
+        return bot.send_message(msg.chat.id, "⚠️ آیدی باید عدد باشد.")
+    if new_uid == ADMIN_ID:
+        clear_state(call.from_user.id)
+        return bot.send_message(msg.chat.id, "❌ شما ادمین اصلی هستید.")
+    add_bot_admin(new_uid)
+    clear_state(call.from_user.id)
+    bot.send_message(msg.chat.id,
+        f"✅ <b>ادمین اضافه شد!</b>\n\n"
+        f"آیدی: <code>{new_uid}</code>\n\n"
+        "این کاربر اکنون به پنل ادمین دسترسی دارد."
+    )
+    try:
+        bot.send_message(new_uid,
+            "🎉 <b>شما به عنوان ادمین ربات اضافه شدید!</b>\n\n"
+            "از منوی اصلی می‌توانید به پنل ادمین دسترسی داشته باشید."
+        )
+    except Exception:
+        pass
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_admin_view_") and c.from_user.id == ADMIN_ID)
+def cb_ap_admin_view(call):
+    bot.answer_callback_query(call.id)
+    target_uid = int(call.data[14:])
+    u = get_user(target_uid)
+    name = (u["username"] or u["full_name"] or str(target_uid)) if u else str(target_uid)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🚫 اخراج از ادمینی", callback_data=f"ap_admin_fire_{target_uid}"))
+    kb.add(types.InlineKeyboardButton("🔙 مدیریت ادمین‌ها", callback_data="ap_admins"))
+    bot.send_message(call.message.chat.id,
+        f"👮 <b>اطلاعات ادمین</b>\n\n"
+        f"👤 نام: <b>{name}</b>\n"
+        f"🆔 آیدی: <code>{target_uid}</code>",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_admin_fire_") and c.from_user.id == ADMIN_ID)
+def cb_ap_admin_fire(call):
+    bot.answer_callback_query(call.id)
+    target_uid = int(call.data[14:])
+    remove_bot_admin(target_uid)
+    bot.send_message(call.message.chat.id, f"✅ کاربر <code>{target_uid}</code> از ادمینی اخراج شد.")
+    try:
+        bot.send_message(target_uid, "❌ دسترسی ادمین شما لغو شد.")
+    except Exception:
+        pass
+
+# ─────────────────────────────────────────────
 #  FLASK
 # ─────────────────────────────────────────────
 flask_app = Flask(__name__)
@@ -5023,4 +5488,8 @@ if __name__ == "__main__":
     print("✅ Flask started")
     threading.Thread(target=_trial_sub_monitor, daemon=True).start()
     print("✅ Trial sub monitor started")
+    threading.Thread(target=_expiry_notification_monitor, daemon=True).start()
+    print("✅ Expiry notification monitor started")
+    threading.Thread(target=_winback_monitor, daemon=True).start()
+    print("✅ Winback monitor started")
     bot.infinity_polling(timeout=60, long_polling_timeout=30)
