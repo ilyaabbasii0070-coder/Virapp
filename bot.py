@@ -1459,7 +1459,7 @@ def _show_shop(chat_id, user_id):
     set_state(user_id, step="shop_type")
     kb = types.InlineKeyboardMarkup(row_width=1)
     if has_v2ray:
-        kb.add(types.InlineKeyboardButton("🔵 V2Ray (کانفیگ VPN)", callback_data="shop_type_v2ray"))
+        kb.add(types.InlineKeyboardButton("🔵 وی‌پی‌ان اختصاصی (V2Ray)", callback_data="shop_type_v2ray"))
     if has_surf:
         kb.add(types.InlineKeyboardButton("🦈 Surfshark یه ساله", callback_data="shop_type_surfshark"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="back_main"))
@@ -5891,19 +5891,17 @@ def _build_sb_ai_system(uid):
     wallet = get_wallet(uid)
     plans_text = "\n".join([f"- {p['label']}: {fmt(p['price'])} تومان" for p in PLANS.values()])
     return (
-        "تو پشتیبان حرفه‌ای و هوشمند ربات ViraNet VPN هستی.\n"
-        "وظیفه‌ات اینه که مشتری رو کامل راهنمایی کنی، سوال‌هاشو جواب بدی و کمکش کنی خرید کنه.\n\n"
+        "تو پشتیبان هوشمند ربات ViraNet هستی.\n\n"
+        "⚠️ قانون مطلق: فقط و فقط به زبان فارسی پاسخ بده. هرگز از انگلیسی، چینی یا هیچ زبان دیگری استفاده نکن. حتی یک کلمه به زبان غیرفارسی ننویس.\n\n"
         f"موجودی کیف پول کاربر: {fmt(wallet)} تومان\n"
         f"پلن‌های موجود:\n{plans_text}\n\n"
-        "قوانین مهم:\n"
-        "- همیشه فارسی و صمیمی جواب بده\n"
-        "- جواب‌ها کامل و مفید باشن، نه خیلی کوتاه\n"
-        "- اگه مشتری خرید می‌خواد، بگو بنویسه 'خرید' تا بریم مراحل خرید\n"
-        "- اگه مشتری مشکل اتصال داره، کامل راهنمایی کن\n"
-        "- اگه نیاز به ادمین بود، بگو @ViraNet0 رو پیام بده\n"
-        "- هرگز نگو 'نمی‌دونم' — همیشه یه راه‌حل یا راهنمایی بده\n"
-        "- اگه مشتری گفت 'خرید' یا درخواست خرید کرد، بنویس: 'برای خرید عبارت /buy رو بفرست'\n"
-        "- درباره VPN، v2ray، کانفیگ، و مشکلات اتصال اطلاعات کامل داری\n"
+        "قوانین:\n"
+        "۱. همیشه صمیمی و فارسی جواب بده\n"
+        "۲. اگه مشتری مشکل اتصال داره، راهنمایی کن\n"
+        "۳. اگه نیاز به ادمین بود بگو با @ViraNet0 تماس بگیرند\n"
+        "۴. هرگز 'نمی‌دونم' نگو — همیشه راهنمایی بده\n"
+        "۵. اگه مشتری خرید خواست بگو /buy بزنه\n"
+        "۶. اسامی فنی مثل VPN، وی‌پی‌ان، سرفشارک، ترون رو می‌تونی به همین شکل بنویسی ولی جملات باید فارسی باشن\n"
     )
 
 def _launch_support_bot(support_token):
@@ -5960,9 +5958,9 @@ def _launch_support_bot(support_token):
                 reload_plans()
                 kb = types.InlineKeyboardMarkup(row_width=1)
                 if V2RAY_ENABLED and PLANS:
-                    kb.add(types.InlineKeyboardButton("🔵 V2Ray (کانفیگ VPN)", callback_data="sb_v2ray"))
+                    kb.add(types.InlineKeyboardButton("🔵 وی‌پی‌ان اختصاصی (V2Ray)", callback_data="sb_v2ray"))
                 if SURFSHARK_ENABLED:
-                    kb.add(types.InlineKeyboardButton(f"🦈 Surfshark یه ساله — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
+                    kb.add(types.InlineKeyboardButton(f"🦈 سرفشارک یک‌ساله نامحدود — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
                 kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sb_back"))
                 sbot.send_message(
                     call.message.chat.id,
@@ -5985,7 +5983,27 @@ def _launch_support_bot(support_token):
                 kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sb_shop"))
                 sbot.send_message(
                     call.message.chat.id,
-                    "🔵 <b>V2Ray — پلن‌ها</b>\n\nپلن مورد نظرت رو انتخاب کن 👇",
+                    "🔵 <b>وی‌پی‌ان — پلن‌ها</b>\n\nپلن مورد نظرت رو انتخاب کن 👇",
+                    reply_markup=kb
+                )
+
+            @sbot.callback_query_handler(func=lambda c: c.data == "sb_surf")
+            def sb_surf_select(call):
+                sbot.answer_callback_query(call.id)
+                uid = call.from_user.id
+                ensure_user(call.from_user)
+                total = SURFSHARK_1YEAR_PRICE
+                _sb_set(uid, step="sb_discount", plan_key="surfshark_1year", qty=1, total=total, base_total=total)
+                kb = types.InlineKeyboardMarkup(row_width=1)
+                kb.add(types.InlineKeyboardButton("⬅️ ندارم، ادامه بده", callback_data="sb_no_discount"))
+                sbot.send_message(
+                    call.message.chat.id,
+                    f"🦈 <b>سرفشارک یک‌ساله نامحدود</b>\n\n"
+                    f"💰 مبلغ: <b>{fmt(total)} تومان</b>\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "🏷️ <b>کد تخفیف داری؟</b>\n\n"
+                    "اگه کد تخفیف داری الان وارد کن،\n"
+                    "وگرنه روی دکمه زیر بزن تا ادامه بدیم 👇",
                     reply_markup=kb
                 )
 
@@ -6086,6 +6104,12 @@ def _launch_support_bot(support_token):
                 )
                 _sb_show_payment(msg.chat.id, uid, _sb_get(uid))
 
+            def _sb_plan_label(plan_key):
+                """برچسب پلن برای نمایش"""
+                if plan_key == "surfshark_1year":
+                    return "🦈 سرفشارک یک‌ساله نامحدود"
+                return PLANS.get(plan_key, {}).get("label", "---")
+
             def _sb_show_payment(chat_id, uid, state):
                 """نمایش روش‌های پرداخت در ربات پشتیبانی"""
                 plan_key = state.get("plan_key")
@@ -6102,16 +6126,18 @@ def _launch_support_bot(support_token):
                 if PAYMENT_CARD_ENABLED:
                     kb.add(types.InlineKeyboardButton("💳 کارت به کارت", callback_data="sb_pay_card"))
                 if PAYMENT_CRYPTO_ENABLED:
-                    kb.add(types.InlineKeyboardButton("💎 پرداخت با TRX", callback_data="sb_pay_crypto"))
+                    kb.add(types.InlineKeyboardButton("💎 پرداخت با ترون (TRX)", callback_data="sb_pay_crypto"))
                 kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="sb_shop"))
                 discount_txt = ""
                 if state.get("discount_code"):
                     discount_txt = f"🏷️ تخفیف {state['discount_percent']}٪ اعمال شد\n"
+                label = _sb_plan_label(plan_key)
+                qty_line = f"🔢 تعداد: {qty} عدد\n" if plan_key != "surfshark_1year" else ""
                 sbot.send_message(
                     chat_id,
                     f"🛒 <b>سفارش نهایی</b>\n\n"
-                    f"📦 پلن: {plan.get('label','---')}\n"
-                    f"🔢 تعداد: {qty} عدد\n"
+                    f"📦 پلن: {label}\n"
+                    f"{qty_line}"
                     f"{discount_txt}"
                     f"💰 مبلغ قابل پرداخت: <b>{fmt(total)} تومان</b>\n\n"
                     "👇 روش پرداخت را انتخاب کن:",
@@ -6126,7 +6152,7 @@ def _launch_support_bot(support_token):
                 plan_key = state.get("plan_key")
                 qty      = state.get("qty", 1)
                 total    = state.get("total", 0)
-                plan     = PLANS.get(plan_key, {})
+                label    = _sb_plan_label(plan_key)
                 discount_code = state.get("discount_code")
                 if get_wallet(uid) < total:
                     return sbot.send_message(call.message.chat.id, "❌ موجودی کیف پول کافی نیست.")
@@ -6143,23 +6169,24 @@ def _launch_support_bot(support_token):
                 u = get_user(uid)
                 uname = (u["username"] or u["full_name"]) if u else str(uid)
                 disc_txt = f"\n🏷️ کد تخفیف: {discount_code}" if discount_code else ""
+                qty_txt  = f"×{qty}" if plan_key != "surfshark_1year" else ""
                 adm_text = (
                     f"🛒 <b>سفارش جدید از ربات پشتیبانی!</b>\n\n"
                     f"👤 @{uname}  |  <code>{uid}</code>\n"
-                    f"📦 {plan.get('label','---')}  ×{qty}\n"
+                    f"📦 {label}  {qty_txt}\n"
                     f"💰 {fmt(total)} تومان | کیف پول{disc_txt}\n"
                     f"🕐 {now_str()}\n\n"
-                    f"⚠️ برای تحویل کانفیگ، از پنل ادمین اقدام کنید.\n"
-                    f"🆔 order_id = {order_id}"
+                    f"⚠️ برای تحویل از پنل ادمین اقدام کنید.\n"
+                    f"🆔 شماره سفارش: {order_id}"
                 )
                 _notify_all_admins_support_text(adm_text)
                 _sb_clear(uid)
                 sbot.send_message(
                     call.message.chat.id,
                     "✅ <b>سفارش شما ثبت شد!</b>\n\n"
-                    f"📦 {plan.get('label','---')}  ×{qty}\n"
+                    f"📦 {label}\n"
                     f"💰 {fmt(total)} تومان از کیف پول کسر شد.\n\n"
-                    "⏳ کانفیگ به زودی برایتان ارسال می‌شود.\n\n"
+                    "⏳ سرویس به زودی برایتان ارسال می‌شود.\n\n"
                     f"❓ پیگیری: @{SUPPORT_USERNAME}"
                 )
 
@@ -6169,15 +6196,23 @@ def _launch_support_bot(support_token):
                 uid   = call.from_user.id
                 state = _sb_get(uid)
                 total = state.get("total", 0)
+                plan_key = state.get("plan_key", "")
+                label = _sb_plan_label(plan_key)
                 _sb_set(uid, step="sb_receipt_card")
                 sbot.send_message(
                     call.message.chat.id,
                     f"💳 <b>پرداخت کارت به کارت</b>\n\n"
-                    f"💰 مبلغ: <b>{fmt(total)} تومان</b>\n\n"
-                    f"🏦 شماره کارت:\n<code>{CARD_NUMBER}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📦 سفارش: {label}\n"
+                    f"💰 مبلغ قابل پرداخت: <b>{fmt(total)} تومان</b>\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🏦 شماره کارت:\n<code>{CARD_NUMBER}</code>\n\n"
                     f"👤 به نام: <b>{CARD_OWNER}</b>\n\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "👇 <b>عکس رسید پرداخت را ارسال کنید:</b>"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "📌 مراحل پرداخت:\n"
+                    "   ۱. مبلغ بالا را به شماره کارت فوق واریز کنید\n"
+                    "   ۲. عکس رسید پرداخت را ارسال کنید\n\n"
+                    "👇 <b>رسید پرداخت را ارسال کنید:</b>"
                 )
 
             @sbot.message_handler(
@@ -6190,7 +6225,7 @@ def _launch_support_bot(support_token):
                 plan_key = state.get("plan_key")
                 qty      = state.get("qty", 1)
                 total    = state.get("total", 0)
-                plan     = PLANS.get(plan_key, {})
+                label    = _sb_plan_label(plan_key)
                 file_id  = msg.photo[-1].file_id
                 discount_code = state.get("discount_code")
                 u        = get_user(uid)
@@ -6215,11 +6250,12 @@ def _launch_support_bot(support_token):
                     types.InlineKeyboardButton("❌ رد",   callback_data=f"recv_rej_{receipt_id}"),
                 )
                 disc_txt = f"\n🏷️ کد تخفیف: {discount_code}" if discount_code else ""
+                qty_txt  = f"×{qty}" if plan_key != "surfshark_1year" else ""
                 caption = (
                     f"📥 <b>رسید خرید از ربات پشتیبانی</b>\n\n"
                     f"👤 @{uname}  |  <code>{uid}</code>\n"
-                    f"📦 {plan.get('label','---')}  ×{qty}\n"
-                    f"💰 {fmt(total)} تومان | کارت{disc_txt}\n"
+                    f"📦 {label}  {qty_txt}\n"
+                    f"💰 {fmt(total)} تومان | کارت به کارت{disc_txt}\n"
                     f"🕐 {now_str()}"
                 )
                 _notify_all_admins_support_photo(caption, file_id, adm_kb)
@@ -6227,7 +6263,7 @@ def _launch_support_bot(support_token):
                 sbot.send_message(
                     msg.chat.id,
                     "📥 <b>رسید دریافت شد!</b>\n\n"
-                    "⏳ در صف بررسی قرار گرفت.\n"
+                    "⏳ سفارش شما در صف بررسی قرار گرفت.\n"
                     "⏱️ معمولاً کمتر از ۳۰ دقیقه\n\n"
                     f"❓ پیگیری: @{SUPPORT_USERNAME}"
                 )
@@ -6238,16 +6274,22 @@ def _launch_support_bot(support_token):
                 uid   = call.from_user.id
                 state = _sb_get(uid)
                 total = state.get("total", 0)
+                plan_key = state.get("plan_key", "")
+                label = _sb_plan_label(plan_key)
                 trx   = toman_to_trx(total)
                 _sb_set(uid, step="sb_receipt_crypto")
                 sbot.send_message(
                     call.message.chat.id,
-                    f"💎 <b>پرداخت با TRX</b>\n\n"
-                    f"💰 مبلغ: {fmt(total)} تومان\n"
+                    f"💎 <b>پرداخت با ترون (TRX)</b>\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📦 سفارش: {label}\n"
+                    f"💰 مبلغ سفارش: <b>{fmt(total)} تومان</b>\n"
                     + (f"🔷 معادل: <code>{trx}</code> TRX\n\n" if trx else "\n") +
-                    f"📌 آدرس:\n<code>{TRX_WALLET}</code>\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📌 آدرس کیف پول:\n<code>{TRX_WALLET}</code>\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     "⚠️ فقط شبکه TRON (TRC-20)\n\n"
-                    "👇 عکس رسید تراکنش را ارسال کنید:"
+                    "👇 پس از واریز، عکس رسید تراکنش را ارسال کنید:"
                 )
 
             @sbot.message_handler(
@@ -6260,7 +6302,7 @@ def _launch_support_bot(support_token):
                 plan_key = state.get("plan_key")
                 qty      = state.get("qty", 1)
                 total    = state.get("total", 0)
-                plan     = PLANS.get(plan_key, {})
+                label    = _sb_plan_label(plan_key)
                 file_id  = msg.photo[-1].file_id
                 discount_code = state.get("discount_code")
                 u        = get_user(uid)
@@ -6285,11 +6327,12 @@ def _launch_support_bot(support_token):
                     types.InlineKeyboardButton("❌ رد",   callback_data=f"recv_rej_{receipt_id}"),
                 )
                 disc_txt = f"\n🏷️ کد تخفیف: {discount_code}" if discount_code else ""
+                qty_txt  = f"×{qty}" if plan_key != "surfshark_1year" else ""
                 caption = (
                     f"📥 <b>رسید خرید از ربات پشتیبانی</b>\n\n"
                     f"👤 @{uname}  |  <code>{uid}</code>\n"
-                    f"📦 {plan.get('label','---')}  ×{qty}\n"
-                    f"💰 {fmt(total)} تومان | TRX{disc_txt}\n"
+                    f"📦 {label}  {qty_txt}\n"
+                    f"💰 {fmt(total)} تومان | ترون (TRX){disc_txt}\n"
                     f"🕐 {now_str()}"
                 )
                 _notify_all_admins_support_photo(caption, file_id, adm_kb)
@@ -6297,7 +6340,7 @@ def _launch_support_bot(support_token):
                 sbot.send_message(
                     msg.chat.id,
                     "📥 <b>رسید دریافت شد!</b>\n\n"
-                    "⏳ در صف بررسی قرار گرفت.\n\n"
+                    "⏳ سفارش شما در صف بررسی قرار گرفت.\n\n"
                     f"❓ پیگیری: @{SUPPORT_USERNAME}"
                 )
 
@@ -6308,9 +6351,9 @@ def _launch_support_bot(support_token):
                 reload_plans()
                 kb = types.InlineKeyboardMarkup(row_width=1)
                 if V2RAY_ENABLED and PLANS:
-                    kb.add(types.InlineKeyboardButton("🔵 V2Ray (کانفیگ VPN)", callback_data="sb_v2ray"))
+                    kb.add(types.InlineKeyboardButton("🔵 وی‌پی‌ان اختصاصی (V2Ray)", callback_data="sb_v2ray"))
                 if SURFSHARK_ENABLED:
-                    kb.add(types.InlineKeyboardButton(f"🦈 Surfshark یه ساله — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
+                    kb.add(types.InlineKeyboardButton(f"🦈 سرفشارک یک‌ساله نامحدود — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
                 sbot.send_message(
                     msg.chat.id,
                     "🛒 <b>فروشگاه ViraNet</b>\n\nچه سرویسی می‌خوای؟ 👇",
@@ -6339,9 +6382,9 @@ def _launch_support_bot(support_token):
                     reload_plans()
                     kb = types.InlineKeyboardMarkup(row_width=1)
                     if V2RAY_ENABLED and PLANS:
-                        kb.add(types.InlineKeyboardButton("🔵 V2Ray (کانفیگ VPN)", callback_data="sb_v2ray"))
+                        kb.add(types.InlineKeyboardButton("🔵 وی‌پی‌ان اختصاصی (V2Ray)", callback_data="sb_v2ray"))
                     if SURFSHARK_ENABLED:
-                        kb.add(types.InlineKeyboardButton(f"🦈 Surfshark یه ساله — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
+                        kb.add(types.InlineKeyboardButton(f"🦈 سرفشارک یک‌ساله نامحدود — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
                     return sbot.send_message(
                         msg.chat.id,
                         "🛒 <b>فروشگاه ViraNet</b>\n\nچه سرویسی می‌خوای؟ 👇",
@@ -6389,9 +6432,9 @@ def _launch_support_bot(support_token):
                     reload_plans()
                     kb = types.InlineKeyboardMarkup(row_width=1)
                     if V2RAY_ENABLED and PLANS:
-                        kb.add(types.InlineKeyboardButton("🔵 V2Ray (کانفیگ VPN)", callback_data="sb_v2ray"))
+                        kb.add(types.InlineKeyboardButton("🔵 وی‌پی‌ان اختصاصی (V2Ray)", callback_data="sb_v2ray"))
                     if SURFSHARK_ENABLED:
-                        kb.add(types.InlineKeyboardButton(f"🦈 Surfshark یه ساله — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
+                        kb.add(types.InlineKeyboardButton(f"🦈 سرفشارک یک‌ساله نامحدود — {fmt(SURFSHARK_1YEAR_PRICE)} تومان", callback_data="sb_surf"))
                     return sbot.send_message(
                         msg.chat.id,
                         "🛒 <b>فروشگاه ViraNet</b>\n\nچه سرویسی می‌خوای؟ 👇",
