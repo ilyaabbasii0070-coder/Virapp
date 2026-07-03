@@ -75,6 +75,11 @@ APP_LINK_ANDROID = ""
 GROUP_ID    = ""
 PANEL_URL   = ""
 PANEL_TOKEN = ""
+PANEL_TYPE  = ""   # "" | "marzban" | "pasarguard" | "xui"
+PANEL_USER  = ""
+PANEL_PASS  = ""
+PANEL_XUI_INBOUND  = ""
+PANEL_XUI_SUB_BASE = ""
 
 NOTIFY_NEW_USER  = True
 NOTIFY_NEW_ORDER = True
@@ -201,6 +206,19 @@ def init_db():
             bot_token TEXT NOT NULL,
             added_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS renewal_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            svc_id INTEGER NOT NULL,
+            service_name TEXT NOT NULL,
+            plan_key TEXT NOT NULL,
+            total_price INTEGER NOT NULL,
+            payment_method TEXT,
+            status TEXT DEFAULT 'pending',
+            receipt_file_id TEXT,
+            admin_msg_id INTEGER,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
         """)
         try:
             conn.execute("ALTER TABLE order_services ADD COLUMN sub_link TEXT")
@@ -228,6 +246,27 @@ def init_db():
         except Exception: pass
         try:
             conn.execute("ALTER TABLE discount_codes ADD COLUMN used_count INTEGER DEFAULT 0")
+            conn.commit()
+        except Exception: pass
+        try:
+            conn.execute("ALTER TABLE order_services ADD COLUMN panel_username TEXT")
+            conn.commit()
+        except Exception: pass
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS panels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                panel_type TEXT NOT NULL,
+                name TEXT,
+                url TEXT NOT NULL,
+                username TEXT NOT NULL,
+                password TEXT NOT NULL,
+                active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now'))
+            )""")
+            conn.commit()
+        except Exception: pass
+        try:
+            conn.execute("ALTER TABLE renewal_orders ADD COLUMN discount_code TEXT")
             conn.commit()
         except Exception: pass
 
@@ -264,6 +303,11 @@ def init_db():
             ("group_id",          ""),
             ("panel_url",         ""),
             ("panel_token",       ""),
+            ("panel_type",        ""),
+            ("panel_user",        ""),
+            ("panel_pass",        ""),
+            ("panel_xui_inbound", ""),
+            ("panel_xui_sub_base", ""),
             ("notify_new_user",   "1"),
             ("notify_new_order",  "1"),
             ("welcome_text",      ""),
@@ -302,11 +346,18 @@ def save_setting(key, value):
         conn.commit()
     with get_db() as conn:
         _reload_settings(conn)
+    if key.startswith("panel_"):
+        try:
+            _panel_session_cache["token"] = None
+            _panel_session_cache["expire"] = 0
+        except Exception:
+            pass
 
 def _reload_settings(conn=None):
     global CARD_NUMBER, CARD_OWNER, TRX_WALLET, SUPPORT_USERNAME, REFERRAL_BONUS
     global FREE_TRIAL_ENABLED, FREE_TRIAL_DAYS, FREE_TRIAL_GB, FREE_TRIAL_CONFIG, FREE_TRIAL_SUB_LINK
     global APP_LINK_IOS, APP_LINK_ANDROID, GROUP_ID, PANEL_URL, PANEL_TOKEN
+    global PANEL_TYPE, PANEL_USER, PANEL_PASS, PANEL_XUI_INBOUND, PANEL_XUI_SUB_BASE
     global NOTIFY_NEW_USER, NOTIFY_NEW_ORDER, WELCOME_TEXT
     global SURFSHARK_1YEAR_PRICE, SURFSHARK_ENABLED, V2RAY_ENABLED
     global PAYMENT_CARD_ENABLED, PAYMENT_CRYPTO_ENABLED
@@ -333,6 +384,11 @@ def _reload_settings(conn=None):
     GROUP_ID           = d.get("group_id",          "")
     PANEL_URL          = d.get("panel_url",         "")
     PANEL_TOKEN        = d.get("panel_token",       "")
+    PANEL_TYPE         = d.get("panel_type",        "")
+    PANEL_USER         = d.get("panel_user",        "")
+    PANEL_PASS         = d.get("panel_pass",        "")
+    PANEL_XUI_INBOUND  = d.get("panel_xui_inbound", "")
+    PANEL_XUI_SUB_BASE = d.get("panel_xui_sub_base","")
     NOTIFY_NEW_USER    = d.get("notify_new_user",   "1") == "1"
     NOTIFY_NEW_ORDER   = d.get("notify_new_order",  "1") == "1"
     WELCOME_TEXT       = d.get("welcome_text",      "")
@@ -476,6 +532,191 @@ def _build_usage_text(info: dict) -> str:
         f"<code>[{bar}]</code>  {pct}٪\n\n"
         f"⏳ <b>زمان باقی‌مانده:</b>  {expire_line}\n"
     )
+
+# ─────────────────────────────────────────────
+#  🎮 PANEL CLIENT (Marzban / Pasarguard / X-UI)
+# ─────────────────────────────────────────────
+_panel_session_cache = {"token": None, "expire": 0}
+
+def _panel_base():
+    return (PANEL_URL or "").rstrip("/")
+
+def panel_test_connection():
+    """تست اتصال به پنل بر اساس نوع تنظیم‌شده. (ok: bool, msg: str)"""
+    try:
+        if PANEL_TYPE in ("marzban", "pasarguard"):
+            tok = _marzban_login()
+            return (True, "اتصال موفق ✅") if tok else (False, "ورود ناموفق - یوزرنیم/پسورد یا آدرس را بررسی کنید.")
+        elif PANEL_TYPE == "xui":
+            sess = _xui_login()
+            return (True, "اتصال موفق ✅") if sess else (False, "ورود ناموفق - یوزرنیم/پسورد یا آدرس را بررسی کنید.")
+        return (False, "نوع پنل تنظیم نشده است.")
+    except Exception as e:
+        return (False, f"خطا: {e}")
+
+# ── Marzban / Pasarguard (سازگار با API مرزبان) ──
+def _marzban_login():
+    import time as _t
+    if _panel_session_cache["token"] and _panel_session_cache["expire"] > _t.time():
+        return _panel_session_cache["token"]
+    try:
+        r = requests.post(
+            f"{_panel_base()}/api/admin/token",
+            data={"username": PANEL_USER, "password": PANEL_PASS},
+            timeout=10
+        )
+        if r.status_code != 200:
+            print(f"[panel/marzban] login failed: {r.status_code} {r.text[:200]}")
+            return None
+        token = r.json().get("access_token")
+        if token:
+            _panel_session_cache["token"] = token
+            _panel_session_cache["expire"] = _t.time() + 3000
+        return token
+    except Exception as e:
+        print(f"[panel/marzban] login error: {e}")
+        return None
+
+def _marzban_create_user(username, gb, days):
+    """ساخت کاربر جدید در مرزبان/پاسارگارد. خروجی: sub_link یا None"""
+    tok = _marzban_login()
+    if not tok: return None
+    try:
+        data_limit = int(gb) * 1024 * 1024 * 1024 if gb else 0
+        expire_ts  = int(time.time()) + int(days) * 86400 if days else 0
+        payload = {
+            "username": username,
+            "proxies": {"vless": {}, "vmess": {}},
+            "data_limit": data_limit,
+            "expire": expire_ts,
+            "data_limit_reset_strategy": "no_reset",
+        }
+        r = requests.post(
+            f"{_panel_base()}/api/user",
+            json=payload,
+            headers={"Authorization": f"Bearer {tok}"},
+            timeout=15
+        )
+        if r.status_code not in (200, 201):
+            print(f"[panel/marzban] create_user failed: {r.status_code} {r.text[:300]}")
+            return None
+        d = r.json()
+        sub = d.get("subscription_url", "")
+        if sub and sub.startswith("/"):
+            sub = _panel_base() + sub
+        return sub or None
+    except Exception as e:
+        print(f"[panel/marzban] create_user error: {e}")
+        return None
+
+def _marzban_renew_user(username, gb, days):
+    """تمدید کاربر در مرزبان/پاسارگارد با ریست حجم و افزایش انقضا"""
+    tok = _marzban_login()
+    if not tok: return False
+    try:
+        data_limit = int(gb) * 1024 * 1024 * 1024 if gb else 0
+        expire_ts  = int(time.time()) + int(days) * 86400 if days else 0
+        payload = {
+            "data_limit": data_limit,
+            "expire": expire_ts,
+            "status": "active",
+            "used_traffic": 0,
+        }
+        r = requests.put(
+            f"{_panel_base()}/api/user/{username}",
+            json=payload,
+            headers={"Authorization": f"Bearer {tok}"},
+            timeout=15
+        )
+        if r.status_code == 200:
+            return True
+        try:
+            requests.post(f"{_panel_base()}/api/user/{username}/reset", headers={"Authorization": f"Bearer {tok}"}, timeout=10)
+        except Exception:
+            pass
+        return r.status_code == 200
+    except Exception as e:
+        print(f"[panel/marzban] renew error: {e}")
+        return False
+
+# ── X-UI / 3X-UI / سنایی ────────────────────────
+def _xui_login():
+    import time as _t
+    if _panel_session_cache["token"] and _panel_session_cache["expire"] > _t.time():
+        return _panel_session_cache["token"]
+    try:
+        s = requests.Session()
+        r = s.post(f"{_panel_base()}/login", data={"username": PANEL_USER, "password": PANEL_PASS}, timeout=10)
+        if r.status_code != 200 or not s.cookies:
+            print(f"[panel/xui] login failed: {r.status_code}")
+            return None
+        cookie_str = "; ".join([f"{c.name}={c.value}" for c in s.cookies])
+        _panel_session_cache["token"] = cookie_str
+        _panel_session_cache["expire"] = _t.time() + 1500
+        return cookie_str
+    except Exception as e:
+        print(f"[panel/xui] login error: {e}")
+        return None
+
+def _xui_create_user(username, gb, days):
+    """ساخت کلاینت جدید در ایکس‌یوآی. نیاز به PANEL_XUI_INBOUND دارد. خروجی: (client_id, sub_link) یا None"""
+    cookie = _xui_login()
+    if not cookie or not PANEL_XUI_INBOUND:
+        return None
+    try:
+        import uuid as _uuid
+        client_id = str(_uuid.uuid4())
+        total_bytes = int(gb) * 1024 * 1024 * 1024 if gb else 0
+        expire_ms   = (int(time.time()) + int(days) * 86400) * 1000 if days else 0
+        client = {
+            "id": client_id, "email": username, "enable": True,
+            "totalGB": total_bytes, "expiryTime": expire_ms,
+            "limitIp": 0, "flow": ""
+        }
+        payload = {"id": int(PANEL_XUI_INBOUND), "settings": json.dumps({"clients": [client]})}
+        r = requests.post(
+            f"{_panel_base()}/panel/api/inbounds/addClient",
+            json=payload, headers={"Cookie": cookie}, timeout=15
+        )
+        if r.status_code != 200 or not r.json().get("success", False):
+            print(f"[panel/xui] addClient failed: {r.text[:300]}")
+            return None
+        sub_link = f"{(PANEL_XUI_SUB_BASE or _panel_base()).rstrip('/')}/sub/{client_id}"
+        return (client_id, sub_link)
+    except Exception as e:
+        print(f"[panel/xui] create_user error: {e}")
+        return None
+
+# ── Dispatcher عمومی ──────────────────────────
+def panel_create_service(username, gb, days):
+    """
+    یک کاربر/سرویس جدید روی پنل فعال می‌سازد.
+    خروجی: (config_text, sub_link) یا None در صورت خطا یا نبود پنل
+    """
+    if not PANEL_TYPE or not PANEL_URL:
+        return None
+    if PANEL_TYPE in ("marzban", "pasarguard"):
+        sub = _marzban_create_user(username, gb, days)
+        if sub:
+            return (f"vless://{username}@{_panel_base()}", sub)
+        return None
+    if PANEL_TYPE == "xui":
+        res = _xui_create_user(username, gb, days)
+        if res:
+            cid, sub = res
+            return (f"client-id: {cid}", sub)
+        return None
+    return None
+
+def panel_renew_service(username, gb, days):
+    """سرویس موجود روی پنل را تمدید می‌کند. خروجی: True/False"""
+    if not PANEL_TYPE or not PANEL_URL:
+        return False
+    if PANEL_TYPE in ("marzban", "pasarguard"):
+        return _marzban_renew_user(username, gb, days)
+    if PANEL_TYPE == "xui":
+        return False  # تمدید مستقیم X-UI فعلاً پشتیبانی نمی‌شود
+    return False
 
 # ── قیمت TRX ──────────────────────────────────
 def get_trx_price_usd():
@@ -2069,6 +2310,85 @@ def handle_all_photos(msg):
     elif step == "surfshark_crypto_receipt":       _handle_surfshark_crypto_receipt(msg)
     elif step == "surfshark_qr_after_receipt":     _handle_surfshark_qr_final(msg)
     elif step == "surfshark_qr_wait":              _handle_surfshark_qr(msg)
+    elif step == "renew_receipt_card":             _handle_renew_card_receipt(msg)
+    elif step == "renew_receipt_crypto":           _handle_renew_crypto_receipt(msg)
+
+def _handle_renew_card_receipt(msg):
+    uid = msg.from_user.id
+    state = get_state(uid)
+    file_id  = msg.photo[-1].file_id
+    svc_id   = state.get("renew_svc_id")
+    plan_key = state.get("renew_plan_key")
+    total    = state.get("renew_total", 0)
+    svc_name = state.get("renew_svc_name", "---")
+    disc_code = state.get("renew_discount_code", "")
+    u = get_user(uid); uname = (u["username"] or u["full_name"]) if u else str(uid)
+    plan = PLANS.get(plan_key, {})
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO renewal_orders(user_id,svc_id,plan_key,total_price,payment_method,discount_code,status,receipt_file_id) VALUES(?,?,?,?,?,?,?,?)",
+            (uid, svc_id, plan_key, total, "card", disc_code, "pending", file_id)
+        )
+        ren_id = cur.lastrowid; conn.commit()
+    adm_kb = types.InlineKeyboardMarkup(row_width=1)
+    adm_kb.add(types.InlineKeyboardButton("✅ تایید تمدید", callback_data=f"ren_ok_{ren_id}"))
+    adm_kb.add(types.InlineKeyboardButton("❌ رد", callback_data=f"ren_rej_{ren_id}"))
+    disc_txt = f"\n🏷️ کد تخفیف: {disc_code}" if disc_code else ""
+    caption = (
+        f"🔄 <b>رسید تمدید سرویس</b>\n\n"
+        f"👤 @{uname}  |  <code>{uid}</code>\n"
+        f"🏷️ سرویس: <b>{html_lib.escape(svc_name)}</b>  |  آیدی: <code>{svc_id}</code>\n"
+        f"📦 پلن: {plan.get('label','---')}\n"
+        f"💰 {fmt(total)} تومان  |  کارت به کارت{disc_txt}\n"
+        f"🕐 {now_str()}"
+    )
+    adm_msg = bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=adm_kb)
+    with get_db() as conn:
+        conn.execute("UPDATE renewal_orders SET admin_msg_id=? WHERE id=?", (adm_msg.message_id, ren_id)); conn.commit()
+    clear_state(uid)
+    bot.send_message(msg.chat.id,
+        "📥 <b>رسید تمدید دریافت شد!</b>\n\n"
+        "⏳ پس از بررسی و تایید، سرویس شما تمدید می‌شود.\n\n"
+        f"❓ پیگیری: @{SUPPORT_USERNAME}"
+    )
+
+def _handle_renew_crypto_receipt(msg):
+    uid = msg.from_user.id
+    state = get_state(uid)
+    file_id  = msg.photo[-1].file_id
+    svc_id   = state.get("renew_svc_id")
+    plan_key = state.get("renew_plan_key")
+    total    = state.get("renew_total", 0)
+    svc_name = state.get("renew_svc_name", "---")
+    u = get_user(uid); uname = (u["username"] or u["full_name"]) if u else str(uid)
+    plan = PLANS.get(plan_key, {})
+    trx = toman_to_trx(total); trx_str = f"{trx} TRX" if trx else "---"
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO renewal_orders(user_id,svc_id,plan_key,total_price,payment_method,status,receipt_file_id) VALUES(?,?,?,?,?,?,?)",
+            (uid, svc_id, plan_key, total, "crypto", "pending", file_id)
+        )
+        ren_id = cur.lastrowid; conn.commit()
+    adm_kb = types.InlineKeyboardMarkup(row_width=1)
+    adm_kb.add(types.InlineKeyboardButton("✅ تایید تمدید", callback_data=f"ren_ok_{ren_id}"))
+    adm_kb.add(types.InlineKeyboardButton("❌ رد", callback_data=f"ren_rej_{ren_id}"))
+    caption = (
+        f"🔄 <b>رسید تمدید سرویس (ترون)</b>\n\n"
+        f"👤 @{uname}  |  <code>{uid}</code>\n"
+        f"🏷️ سرویس: <b>{html_lib.escape(svc_name)}</b>  |  آیدی: <code>{svc_id}</code>\n"
+        f"📦 پلن: {plan.get('label','---')}\n"
+        f"💰 {fmt(total)} تومان  |  {trx_str}\n"
+        f"🕐 {now_str()}"
+    )
+    adm_msg = bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=adm_kb)
+    with get_db() as conn:
+        conn.execute("UPDATE renewal_orders SET admin_msg_id=? WHERE id=?", (adm_msg.message_id, ren_id)); conn.commit()
+    clear_state(uid)
+    bot.send_message(msg.chat.id,
+        "📥 <b>رسید تمدید دریافت شد!</b>\n\n"
+        "⏳ پس از بررسی و تایید، سرویس شما تمدید می‌شود.\n\n"
+        f"❓ پیگیری: @{SUPPORT_USERNAME}"
+    )
 
 def _handle_shop_receipt(msg):
     state = get_state(msg.from_user.id); order_id = state.get("order_id")
@@ -2511,6 +2831,117 @@ def cb_surf_qr_rej(call):
     bot.send_message(ADMIN_ID, f"❌ QR سفارش #{order_id} رد شد. منتظر QR جدید.")
 
 # ─────────────────────────────────────────────
+#  ADMIN: RENEWAL APPROVE / REJECT
+# ─────────────────────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ren_ok_"))
+def cb_ren_approve(call):
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    ren_id = int(call.data[7:])
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        ren = conn.execute("SELECT * FROM renewal_orders WHERE id=?", (ren_id,)).fetchone()
+        if not ren: return bot.send_message(call.message.chat.id, "❌ سفارش یافت نشد.")
+        conn.execute("UPDATE renewal_orders SET status='approved' WHERE id=?", (ren_id,))
+        conn.commit()
+    # پاک کردن پیام رسید ادمین
+    if ren["admin_msg_id"]:
+        try: safe_delete(ADMIN_ID, ren["admin_msg_id"])
+        except Exception: pass
+    # اطلاع به ادمین با دکمه "تمام"
+    plan = PLANS.get(ren["plan_key"], {})
+    with get_db() as conn:
+        svc = conn.execute("SELECT * FROM order_services WHERE id=?", (ren["svc_id"],)).fetchone()
+    u = get_user(ren["user_id"])
+    uname = (u["username"] or u["full_name"]) if u else str(ren["user_id"])
+    done_kb = types.InlineKeyboardMarkup(row_width=1)
+    done_kb.add(types.InlineKeyboardButton("✅ تمام — تمدید انجام شد", callback_data=f"ren_done_{ren_id}"))
+    bot.send_message(call.message.chat.id,
+        f"✅ <b>رسید تمدید تایید شد</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👤 @{uname}  |  <code>{ren['user_id']}</code>\n"
+        f"🏷️ سرویس: <b>{html_lib.escape(ren.get('service_name') or (svc['service_name'] if svc else '---'))}</b>\n"
+        f"📦 پلن: {plan.get('label','---')}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⚙️ <b>تمدید سرویس را انجام بده، بعد دکمه «تمام» را بزن:</b>",
+        reply_markup=done_kb
+    )
+    # اطلاع به کاربر که تایید شد
+    try:
+        bot.send_message(ren["user_id"],
+            "✅ <b>رسید تمدید شما تایید شد!</b>\n\n"
+            "⏳ سرویس شما در حال تمدید است، لطفاً چند لحظه صبر کنید..."
+        )
+    except Exception: pass
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ren_done_"))
+def cb_ren_done(call):
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    ren_id = int(call.data[9:])
+    bot.answer_callback_query(call.id, "✅ تمدید ثبت شد!", show_alert=True)
+    with get_db() as conn:
+        ren = conn.execute("SELECT * FROM renewal_orders WHERE id=?", (ren_id,)).fetchone()
+        if not ren: return bot.send_message(call.message.chat.id, "❌ سفارش یافت نشد.")
+        conn.execute("UPDATE renewal_orders SET status='delivered' WHERE id=?", (ren_id,))
+        conn.commit()
+    safe_delete(call.message.chat.id, call.message.message_id)
+    bot.send_message(call.message.chat.id, f"✅ تمدید سرویس #{ren_id} انجام شد.")
+    # پیام به کاربر
+    plan = PLANS.get(ren["plan_key"], {})
+    try:
+        # بررسی ساب‌لینک برای نمایش حجم جدید
+        with get_db() as conn:
+            svc = conn.execute("SELECT * FROM order_services WHERE id=?", (ren["svc_id"],)).fetchone()
+        sub = (svc["sub_link"] or "") if svc else ""
+        usage_text = ""
+        if sub.startswith("http"):
+            try:
+                info = get_sub_info(sub)
+                if info:
+                    usage_text = (
+                        "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        "📊 <b>وضعیت جدید سرویس:</b>\n\n"
+                        + _build_usage_text(info)
+                    )
+            except Exception: pass
+        svc_name = svc["service_name"] if svc else "سرویس شما"
+        bot.send_message(ren["user_id"],
+            f"🎉 <b>سرویس شما با موفقیت تمدید شد!</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🏷️ <b>سرویس:</b> {html_lib.escape(svc_name)}\n"
+            f"📦 <b>پلن:</b> {plan.get('label','---')}\n"
+            f"🕐 <b>زمان تمدید:</b> {datetime.now().strftime('%Y/%m/%d — %H:%M')}"
+            f"{usage_text}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🆘 پشتیبانی: @{SUPPORT_USERNAME}\n"
+            "💙 از اعتماد شما سپاسگزاریم! 🌟"
+        )
+    except Exception as e:
+        print(f"[ren_done] {e}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ren_rej_"))
+def cb_ren_reject(call):
+    if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
+    ren_id = int(call.data[8:])
+    bot.answer_callback_query(call.id)
+    with get_db() as conn:
+        ren = conn.execute("SELECT * FROM renewal_orders WHERE id=?", (ren_id,)).fetchone()
+        if not ren: return bot.send_message(call.message.chat.id, "❌ سفارش یافت نشد.")
+        conn.execute("UPDATE renewal_orders SET status='rejected' WHERE id=?", (ren_id,))
+        conn.commit()
+    if ren["admin_msg_id"]:
+        try: safe_delete(ADMIN_ID, ren["admin_msg_id"])
+        except Exception: pass
+    safe_delete(call.message.chat.id, call.message.message_id)
+    try:
+        bot.send_message(ren["user_id"],
+            "❌ <b>رسید تمدید شما رد شد.</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📞 پیگیری: @{SUPPORT_USERNAME}"
+        )
+    except Exception: pass
+    bot.send_message(call.message.chat.id, f"❌ درخواست تمدید #{ren_id} رد شد.")
+
+# ─────────────────────────────────────────────
 #  ADMIN: APPROVE / REJECT
 # ─────────────────────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_ok_"))
@@ -2519,13 +2950,54 @@ def cb_admin_approve(call):
     order_id = int(call.data[7:]); bot.answer_callback_query(call.id)
     with get_db() as conn:
         order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-    qty = order["quantity"] if order else 1
+        svc_rows = conn.execute("SELECT * FROM order_services WHERE order_id=? ORDER BY id", (order_id,)).fetchall()
+    if not order: return bot.send_message(call.message.chat.id, "❌ سفارش یافت نشد.")
+    qty = order["quantity"]
+    plan = PLANS.get(order["plan_key"], {})
+
+    # ── بررسی پنل فعال ──────────────────────────────
+    active_panel = get_active_panel()
+    if active_panel and plan.get("gb") and plan.get("days"):
+        bot.send_message(call.message.chat.id, "⏳ <b>در حال ساخت سرویس روی پنل...</b>")
+        configs = []; subs = []
+        panel_dict = dict(active_panel)
+        all_ok = True
+        for svc in svc_rows:
+            pan_username = f"v_{svc['id']}_{order['user_id']}"
+            sub, cfg = _panel_create_user(panel_dict, pan_username, plan["gb"], plan["days"])
+            if not sub and not cfg:
+                all_ok = False
+                bot.send_message(call.message.chat.id,
+                    f"⚠️ ساخت سرویس روی پنل برای <b>{svc['service_name']}</b> ناموفق بود.\n"
+                    "لطفاً دستی وارد کنید:"
+                )
+                break
+            configs.append(cfg or "")
+            subs.append(sub or "")
+            # ذخیره نام یوزر پنل
+            with get_db() as conn:
+                try:
+                    conn.execute("UPDATE order_services SET panel_username=? WHERE id=?", (pan_username, svc["id"]))
+                    conn.commit()
+                except Exception: pass
+        if all_ok and len(configs) == len(svc_rows):
+            _deliver_configs(order_id, configs, subs)
+            _delete_receipt_admin_msg(order_id)
+            bot.send_message(call.message.chat.id,
+                f"✅ <b>سرویس‌ها روی پنل ساخته و ارسال شدند!</b>\n\n"
+                f"🔢 {len(configs)} سرویس — <b>{plan.get('gb','?')}GB | {plan.get('days','?')} روز</b>"
+            )
+            return
+
+    # ── پنل فعال نیست یا ناموفق — دستی ───────────────
     set_state(call.from_user.id, step="adm_config", order_id=order_id, configs=[], subs=[], expected_qty=qty)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("✅ پایان و ارسال (/done)", callback_data=f"adm_done_{order_id}"))
+    panel_note = "" if not active_panel else "\n⚠️ <b>پنل در دسترس نبود — دستی وارد کنید</b>\n"
     bot.send_message(call.message.chat.id,
         f"✅ <b>تایید سفارش #{order_id}</b>\n\n"
         f"🔢 تعداد سرویس: <b>{qty}</b> عدد\n\n"
+        f"{panel_note}"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📋 <b>مرحله ۱:</b> کانفیگ سرویس اول را ارسال کنید\n"
         "📡 <b>مرحله ۲:</b> ساب‌لینک آن را ارسال کنید\n"
@@ -2733,6 +3205,167 @@ def rename_service(msg):
     bot.send_message(msg.chat.id, f"✅ نام سرویس به <b>{name}</b> تغییر یافت! ✨")
 
 # ─────────────────────────────────────────────
+#  🔄 RENEWAL FLOW
+# ─────────────────────────────────────────────
+@bot.callback_query_handler(func=lambda c: c.data.startswith("renew_"))
+def cb_renew_svc(call):
+    if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
+    svc_id = int(call.data[6:])
+    uid = call.from_user.id
+    with get_db() as conn:
+        svc = conn.execute("SELECT * FROM order_services WHERE id=? AND user_id=?", (svc_id, uid)).fetchone()
+    if not svc:
+        return bot.answer_callback_query(call.id, "سرویس یافت نشد", show_alert=True)
+    bot.answer_callback_query(call.id)
+    plan = PLANS.get(svc["plan_key"], {})
+    if not plan:
+        return bot.send_message(call.message.chat.id, "❌ پلن این سرویس دیگر موجود نیست. لطفاً با پشتیبانی تماس بگیرید.")
+    total = plan["price"]
+    wallet = get_wallet(uid)
+    set_state(uid, step="renew_payment", renew_svc_id=svc_id, renew_plan_key=svc["plan_key"],
+              renew_total=total, renew_svc_name=svc["service_name"])
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(f"💰 کیف پول (موجودی: {fmt(wallet)} ت)", callback_data="renew_pay_wallet"))
+    if PAYMENT_CARD_ENABLED:
+        kb.add(types.InlineKeyboardButton("💳 کارت به کارت", callback_data="renew_pay_card"))
+    if PAYMENT_CRYPTO_ENABLED:
+        kb.add(types.InlineKeyboardButton("🔷 ترون (TRX)", callback_data="renew_pay_crypto"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=f"vs_{svc_id}"))
+    bot.send_message(call.message.chat.id,
+        f"🔄 <b>تمدید سرویس</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏷️ <b>سرویس:</b> {html_lib.escape(svc['service_name'])}\n"
+        f"📦 <b>پلن:</b> {plan.get('label','---')}\n"
+        f"💰 <b>مبلغ تمدید:</b> {fmt(total)} تومان\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 روش پرداخت را انتخاب کنید:",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data in ("renew_pay_wallet", "renew_pay_card", "renew_pay_crypto"))
+def cb_renew_payment(call):
+    if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
+    uid = call.from_user.id
+    state = get_state(uid)
+    if state.get("step") != "renew_payment": return bot.answer_callback_query(call.id)
+    bot.answer_callback_query(call.id)
+    svc_id   = state.get("renew_svc_id")
+    plan_key = state.get("renew_plan_key")
+    total    = state.get("renew_total", 0)
+    svc_name = state.get("renew_svc_name", "---")
+    wallet   = get_wallet(uid)
+    u        = get_user(uid)
+    uname    = (u["username"] or u["full_name"]) if u else str(uid)
+
+    if call.data == "renew_pay_wallet":
+        if wallet < total:
+            return bot.send_message(call.message.chat.id,
+                f"❌ <b>موجودی کیف پول کافی نیست!</b>\n\n"
+                f"💰 موجودی: {fmt(wallet)} ت\n💳 نیاز: {fmt(total)} ت"
+            )
+        deduct_wallet(uid, total)
+        with get_db() as conn:
+            cur = conn.execute(
+                "INSERT INTO renewal_orders(user_id,svc_id,plan_key,total_price,payment_method,status) VALUES(?,?,?,?,?,?)",
+                (uid, svc_id, plan_key, total, "wallet", "pending")
+            )
+            ren_id = cur.lastrowid; conn.commit()
+        plan = PLANS.get(plan_key, {})
+        adm_kb = types.InlineKeyboardMarkup(row_width=1)
+        adm_kb.add(types.InlineKeyboardButton("✅ تایید تمدید", callback_data=f"ren_ok_{ren_id}"))
+        adm_kb.add(types.InlineKeyboardButton("❌ رد", callback_data=f"ren_rej_{ren_id}"))
+        adm_txt = (
+            f"🔄 <b>درخواست تمدید سرویس</b>\n\n"
+            f"👤 @{uname}  |  <code>{uid}</code>\n"
+            f"🏷️ سرویس: <b>{html_lib.escape(svc_name)}</b>  |  آیدی: <code>{svc_id}</code>\n"
+            f"📦 پلن: {plan.get('label','---')}\n"
+            f"💰 مبلغ: {fmt(total)} تومان  |  کیف پول\n"
+            f"🕐 {now_str()}"
+        )
+        adm_msg = bot.send_message(ADMIN_ID, adm_txt, reply_markup=adm_kb)
+        with get_db() as conn:
+            conn.execute("UPDATE renewal_orders SET admin_msg_id=? WHERE id=?", (adm_msg.message_id, ren_id)); conn.commit()
+        clear_state(uid)
+        bot.send_message(call.message.chat.id,
+            "✅ <b>درخواست تمدید ثبت شد!</b>\n\n"
+            "⏳ پس از تایید ادمین، سرویس شما تمدید می‌شود.\n\n"
+            f"❓ پیگیری: @{SUPPORT_USERNAME}"
+        )
+
+    elif call.data == "renew_pay_card":
+        set_state(uid, step="renew_discount_wait", renew_svc_id=svc_id, renew_plan_key=plan_key,
+                  renew_total=total, renew_svc_name=svc_name, renew_base_total=total)
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        kb.add(types.InlineKeyboardButton("🏷️ کد تخفیف ندارم", callback_data="renew_no_discount"))
+        bot.send_message(call.message.chat.id,
+            f"💳 <b>پرداخت کارت به کارت — تمدید</b>\n\n"
+            f"💰 مبلغ: {fmt(total)} تومان\n\n"
+            "🏷️ کد تخفیف دارید؟ وارد کنید یا دکمه زیر را بزنید:",
+            reply_markup=kb
+        )
+
+    else:  # crypto
+        trx = toman_to_trx(total)
+        set_state(uid, step="renew_receipt_crypto", renew_svc_id=svc_id, renew_plan_key=plan_key,
+                  renew_total=total, renew_svc_name=svc_name)
+        bot.send_message(call.message.chat.id,
+            f"💎 <b>پرداخت با ترون — تمدید</b>\n\n"
+            f"💰 مبلغ: <b>{fmt(total)} تومان</b>\n"
+            + (f"🔷 معادل: <code>{trx}</code> TRX\n\n" if trx else "\n") +
+            f"📌 آدرس:\n<code>{TRX_WALLET}</code>\n\n"
+            "👇 بعد از واریز رسید را ارسال کنید:"
+        )
+
+@bot.callback_query_handler(func=lambda c: c.data == "renew_no_discount")
+def cb_renew_no_discount(call):
+    if is_offline_for(call.from_user.id): return bot.answer_callback_query(call.id, "⚠️ ربات خاموش است.", show_alert=True)
+    bot.answer_callback_query(call.id)
+    state = get_state(call.from_user.id)
+    if state.get("step") != "renew_discount_wait": return
+    set_state(call.from_user.id, step="renew_receipt_card")
+    _renew_show_card_info(call.message.chat.id, state)
+
+@bot.message_handler(func=lambda m: get_state(m.from_user.id).get("step") == "renew_discount_wait")
+def renew_discount_input(msg):
+    if is_offline_for(msg.from_user.id): return bot.send_message(msg.chat.id, OFFLINE_MSG)
+    uid = msg.from_user.id
+    code = (msg.text or "").strip().upper()
+    state = get_state(uid)
+    base_total = state.get("renew_base_total", state.get("renew_total", 0))
+    d = get_discount(code, uid)
+    if d == "already_used":
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🏷️ کد ندارم", callback_data="renew_no_discount"))
+        return bot.send_message(msg.chat.id, "❌ این کد قبلاً استفاده شده.\n\nکد دیگری وارد کن یا دکمه زیر را بزن:", reply_markup=kb)
+    if not d:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🏷️ کد ندارم", callback_data="renew_no_discount"))
+        return bot.send_message(msg.chat.id, "❌ کد تخفیف نامعتبر است.\n\nدوباره امتحان کن یا دکمه زیر را بزن:", reply_markup=kb)
+    new_price = apply_discount(base_total, d["percent"])
+    mark_discount_used(code, uid)
+    set_state(uid, step="renew_receipt_card", renew_total=new_price, renew_discount_code=code)
+    bot.send_message(msg.chat.id,
+        f"✅ کد تخفیف اعمال شد!\n\n"
+        f"💸 تخفیف: {d['percent']}٪\n"
+        f"💰 مبلغ نهایی: <b>{fmt(new_price)} تومان</b>"
+    )
+    _renew_show_card_info(msg.chat.id, get_state(uid))
+
+def _renew_show_card_info(chat_id, state):
+    total = state.get("renew_total", 0)
+    svc_name = state.get("renew_svc_name", "---")
+    bot.send_message(chat_id,
+        f"💳 <b>پرداخت کارت به کارت — تمدید</b>\n\n"
+        f"🏷️ سرویس: {html_lib.escape(svc_name)}\n"
+        f"💰 مبلغ: <b>{fmt(total)} تومان</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💳 شماره کارت:\n<code>{CARD_NUMBER}</code>\n\n"
+        f"👤 به نام: <b>{CARD_OWNER}</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👇 بعد از واریز، رسید را ارسال کنید:"
+    )
+
+# ─────────────────────────────────────────────
 #  📦 MY SERVICES
 # ─────────────────────────────────────────────
 def _show_my_services(chat_id, user_id):
@@ -2784,6 +3417,7 @@ def _build_svc_message(svc, plan, fetch_usage=True):
     kb = types.InlineKeyboardMarkup(row_width=1)
     if sub.startswith("http"):
         kb.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=sub))
+    kb.add(types.InlineKeyboardButton("🔄 تمدید سرویس", callback_data=f"renew_{svc['id']}"))
     kb.add(types.InlineKeyboardButton("✏️ تغییر نام", callback_data=f"rename_{svc['id']}"))
     kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="menu_services"))
 
@@ -3640,40 +4274,320 @@ def adm_set_group(msg):
     bot.send_message(msg.chat.id, f"✅ گروه به <code>{val}</code> تنظیم شد.")
 
 # ── مدیریت پنل VPN ───────────────────────────
+# ─────────────────────────────────────────────
+#  🎮 PANEL API FUNCTIONS
+# ─────────────────────────────────────────────
+PANEL_TYPES = {
+    "marzban":    "🟢 مرزبان (Marzban)",
+    "marzneshin": "🔵 مرزنشین / سنایی (Marzneshin)",
+    "pasarguad":  "🟣 پاسارگاد (Pasarguard)",
+}
+
+def get_active_panel():
+    """برمی‌گرداند اولین پنل فعال"""
+    with get_db() as conn:
+        return conn.execute("SELECT * FROM panels WHERE active=1 ORDER BY id LIMIT 1").fetchone()
+
+def get_all_panels():
+    with get_db() as conn:
+        return conn.execute("SELECT * FROM panels ORDER BY id").fetchall()
+
+def _panel_get_token(panel):
+    """گرفتن توکن از پنل (Marzban / Marzneshin)"""
+    pt = panel["panel_type"]
+    url = panel["url"].rstrip("/")
+    try:
+        if pt == "marzban":
+            r = requests.post(f"{url}/api/admin/token",
+                data={"username": panel["username"], "password": panel["password"]},
+                timeout=10)
+        elif pt == "marzneshin":
+            r = requests.post(f"{url}/api/admins/token",
+                data={"username": panel["username"], "password": panel["password"]},
+                timeout=10)
+        elif pt == "pasarguad":
+            r = requests.post(f"{url}/api/admin/login",
+                json={"username": panel["username"], "password": panel["password"]},
+                timeout=10)
+        else:
+            return None
+        data = r.json()
+        return data.get("access_token") or data.get("token")
+    except Exception as e:
+        print(f"[panel_token] {e}")
+        return None
+
+def _panel_create_user(panel, username, gb, days):
+    """ساخت یوزر روی پنل و برگرداندن (sub_link, config_link)"""
+    pt  = panel["panel_type"]
+    url = panel["url"].rstrip("/")
+    token = _panel_get_token(panel)
+    if not token:
+        return None, None
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    import time as _time
+    expire_ts = int(_time.time()) + days * 86400
+    data_limit = gb * 1024 * 1024 * 1024  # bytes
+    try:
+        if pt == "marzban":
+            payload = {
+                "username": username,
+                "proxies": {"vless": {}, "vmess": {}},
+                "inbounds": {},
+                "expire": expire_ts,
+                "data_limit": data_limit,
+                "data_limit_reset_strategy": "no_reset",
+            }
+            r = requests.post(f"{url}/api/user", json=payload, headers=headers, timeout=15)
+            d = r.json()
+            sub = d.get("subscription_url", "")
+            if sub and not sub.startswith("http"):
+                sub = url + sub
+            links = d.get("links", [])
+            cfg = links[0] if links else ""
+            return sub, cfg
+        elif pt == "marzneshin":
+            payload = {
+                "username": username,
+                "expire": expire_ts,
+                "data_limit": data_limit,
+                "data_limit_reset_strategy": "no_reset",
+                "service_ids": [],
+            }
+            r = requests.post(f"{url}/api/users", json=payload, headers=headers, timeout=15)
+            d = r.json()
+            sub = d.get("subscription_url", "")
+            if sub and not sub.startswith("http"):
+                sub = url + sub
+            return sub, ""
+        elif pt == "pasarguad":
+            payload = {
+                "username": username,
+                "trafficLimit": gb,
+                "expiresAt": expire_ts,
+            }
+            r = requests.post(f"{url}/api/clients", json=payload, headers=headers, timeout=15)
+            d = r.json()
+            sub = d.get("subscriptionLink") or d.get("sub_link", "")
+            if sub and not sub.startswith("http"):
+                sub = url + sub
+            cfg = d.get("vmessLink") or d.get("config", "")
+            return sub, cfg
+    except Exception as e:
+        print(f"[panel_create_user] {e}")
+    return None, None
+
+def _panel_get_user_info(panel, username):
+    """گرفتن اطلاعات یوزر از پنل"""
+    pt  = panel["panel_type"]
+    url = panel["url"].rstrip("/")
+    token = _panel_get_token(panel)
+    if not token: return None
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        if pt == "marzban":
+            r = requests.get(f"{url}/api/user/{username}", headers=headers, timeout=10)
+            return r.json()
+        elif pt == "marzneshin":
+            r = requests.get(f"{url}/api/users/{username}", headers=headers, timeout=10)
+            return r.json()
+        elif pt == "pasarguad":
+            r = requests.get(f"{url}/api/clients/{username}", headers=headers, timeout=10)
+            return r.json()
+    except Exception as e:
+        print(f"[panel_get_user] {e}")
+    return None
+
+def _panel_reset_user(panel, username, gb, days):
+    """ریست/تمدید یوزر روی پنل"""
+    pt  = panel["panel_type"]
+    url = panel["url"].rstrip("/")
+    token = _panel_get_token(panel)
+    if not token: return False
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    import time as _time
+    expire_ts = int(_time.time()) + days * 86400
+    data_limit = gb * 1024 * 1024 * 1024
+    try:
+        if pt == "marzban":
+            payload = {"expire": expire_ts, "data_limit": data_limit}
+            r = requests.put(f"{url}/api/user/{username}", json=payload, headers=headers, timeout=15)
+            return r.status_code < 300
+        elif pt == "marzneshin":
+            payload = {"expire": expire_ts, "data_limit": data_limit}
+            r = requests.put(f"{url}/api/users/{username}", json=payload, headers=headers, timeout=15)
+            return r.status_code < 300
+        elif pt == "pasarguad":
+            payload = {"trafficLimit": gb, "expiresAt": expire_ts}
+            r = requests.put(f"{url}/api/clients/{username}", json=payload, headers=headers, timeout=15)
+            return r.status_code < 300
+    except Exception as e:
+        print(f"[panel_reset_user] {e}")
+    return False
+
+# ─────────────────────────────────────────────
+#  🎮 VPN PANEL MANAGEMENT UI
+# ─────────────────────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data == "ap_vpn_panel" and is_admin(c.from_user.id))
 def cb_ap_vpn_panel(call):
     bot.answer_callback_query(call.id)
+    panels = get_all_panels()
     kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("🌐 تنظیم آدرس پنل",      callback_data="ap_set_panel_url"))
-    kb.add(types.InlineKeyboardButton("🔑 تنظیم توکن/API Key",   callback_data="ap_set_panel_token"))
-    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",              callback_data="ap_settings"))
-    url_txt   = f"<code>{PANEL_URL}</code>"   if PANEL_URL   else "<i>تنظیم نشده</i>"
-    token_txt = f"<code>{'*' * min(len(PANEL_TOKEN), 8)}...</code>" if PANEL_TOKEN else "<i>تنظیم نشده</i>"
+    kb.add(types.InlineKeyboardButton("➕ اضافه کردن پنل", callback_data="ap_panel_add"))
+    for p in panels:
+        status = "✅" if p["active"] else "❌"
+        ptype_label = PANEL_TYPES.get(p["panel_type"], p["panel_type"])
+        kb.add(types.InlineKeyboardButton(
+            f"{status} {ptype_label} — {p['url'][:30]}",
+            callback_data=f"ap_panel_view_{p['id']}"
+        ))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات", callback_data="ap_settings"))
+    panels_text = f"✅ {len(panels)} پنل ثبت شده" if panels else "❌ هیچ پنلی اضافه نشده"
     bot.send_message(call.message.chat.id,
         "🎮 <b>مدیریت پنل VPN</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🌐 آدرس پنل: {url_txt}\n"
-        f"🔑 توکن: {token_txt}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📡 {panels_text}\n\n"
+        "📌 <b>پنل‌های پشتیبانی شده:</b>\n"
+        "  🟢 مرزبان (Marzban)\n"
+        "  🔵 مرزنشین / سنایی (Marzneshin)\n"
+        "  🟣 پاسارگاد (Pasarguard)\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "💡 وقتی پنل فعال باشد، بعد از تایید رسید به‌صورت خودکار سرویس ساخته و ارسال می‌شود.\n\n"
+        "👇 برای افزودن یا مدیریت پنل:",
         reply_markup=kb
     )
 
-@bot.callback_query_handler(func=lambda c: c.data in ("ap_set_panel_url","ap_set_panel_token") and is_admin(c.from_user.id))
-def cb_ap_set_panel(call):
+@bot.callback_query_handler(func=lambda c: c.data == "ap_panel_add" and is_admin(c.from_user.id))
+def cb_ap_panel_add(call):
     bot.answer_callback_query(call.id)
-    if call.data == "ap_set_panel_url":
-        set_state(call.from_user.id, step="adm_set_panel_url")
-        bot.send_message(call.message.chat.id,
-            "🌐 آدرس پنل را وارد کنید:\n\n"
-            "<i>مثال: https://panel.example.com</i>"
-        )
-    else:
-        set_state(call.from_user.id, step="adm_set_panel_token")
-        bot.send_message(call.message.chat.id,
-            "🔑 توکن یا API Key پنل را وارد کنید:\n\n"
-            "<i>این مقدار بصورت رمزگذاری شده ذخیره می‌شود.</i>"
-        )
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for key, label in PANEL_TYPES.items():
+        kb.add(types.InlineKeyboardButton(label, callback_data=f"ap_panel_type_{key}"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="ap_vpn_panel"))
+    bot.send_message(call.message.chat.id,
+        "➕ <b>اضافه کردن پنل VPN</b>\n\n"
+        "نوع پنل خود را انتخاب کنید:",
+        reply_markup=kb
+    )
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_panel_type_") and is_admin(c.from_user.id))
+def cb_ap_panel_type(call):
+    bot.answer_callback_query(call.id)
+    ptype = call.data[14:]
+    if ptype not in PANEL_TYPES:
+        return bot.send_message(call.message.chat.id, "❌ نوع پنل نامعتبر است.")
+    set_state(call.from_user.id, step="adm_panel_url", new_panel_type=ptype)
+    bot.send_message(call.message.chat.id,
+        f"🌐 <b>افزودن پنل {PANEL_TYPES[ptype]}</b>\n\n"
+        "آدرس پنل را وارد کنید:\n\n"
+        "<i>مثال: https://panel.example.com</i>"
+    )
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_panel_url")
+def adm_panel_url(msg):
+    val = (msg.text or "").strip()
+    if not val.startswith("http"):
+        return bot.send_message(msg.chat.id, "⚠️ آدرس باید با http شروع شود.")
+    set_state(msg.from_user.id, step="adm_panel_user", new_panel_url=val.rstrip("/"))
+    bot.send_message(msg.chat.id, f"✅ آدرس: <code>{val}</code>\n\n👇 نام کاربری پنل را وارد کنید:")
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_panel_user")
+def adm_panel_user(msg):
+    val = (msg.text or "").strip()
+    if not val: return bot.send_message(msg.chat.id, "⚠️ نام کاربری نمی‌تواند خالی باشد.")
+    set_state(msg.from_user.id, step="adm_panel_pass", new_panel_username=val)
+    bot.send_message(msg.chat.id, f"✅ نام کاربری: <b>{val}</b>\n\n👇 رمز عبور پنل را وارد کنید:")
+
+@bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") == "adm_panel_pass")
+def adm_panel_pass(msg):
+    val = (msg.text or "").strip()
+    if not val: return bot.send_message(msg.chat.id, "⚠️ رمز عبور نمی‌تواند خالی باشد.")
+    state = get_state(msg.from_user.id)
+    ptype    = state.get("new_panel_type")
+    url      = state.get("new_panel_url")
+    username = state.get("new_panel_username")
+    # تست اتصال
+    bot.send_message(msg.chat.id, "⏳ <b>در حال بررسی اتصال...</b>")
+    test_panel = {"panel_type": ptype, "url": url, "username": username, "password": val}
+    token = _panel_get_token(test_panel)
+    if not token:
+        return bot.send_message(msg.chat.id,
+            "❌ <b>اتصال ناموفق!</b>\n\n"
+            "آدرس، نام کاربری یا رمز عبور اشتباه است.\n"
+            "دوباره از /start شروع کنید یا آدرس را بررسی کنید."
+        )
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO panels(panel_type, url, username, password, active) VALUES(?,?,?,?,1)",
+            (ptype, url, username, val)
+        )
+        conn.commit()
+    clear_state(msg.from_user.id)
+    bot.send_message(msg.chat.id,
+        f"✅ <b>پنل با موفقیت اضافه و تست شد!</b>\n\n"
+        f"🟢 نوع: {PANEL_TYPES.get(ptype, ptype)}\n"
+        f"🌐 آدرس: <code>{url}</code>\n\n"
+        "از این به بعد بعد از تایید رسید، ربات به‌صورت خودکار سرویس می‌سازد و برای کاربر می‌فرستد."
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_panel_view_") and is_admin(c.from_user.id))
+def cb_ap_panel_view(call):
+    bot.answer_callback_query(call.id)
+    pid = int(call.data[14:])
+    with get_db() as conn:
+        p = conn.execute("SELECT * FROM panels WHERE id=?", (pid,)).fetchone()
+    if not p: return bot.send_message(call.message.chat.id, "❌ پنل یافت نشد.")
+    status_lbl = "✅ فعال" if p["active"] else "❌ غیرفعال"
+    toggle_lbl = "❌ غیرفعال کردن" if p["active"] else "✅ فعال کردن"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton("🔌 تست اتصال", callback_data=f"ap_panel_test_{pid}"))
+    kb.add(types.InlineKeyboardButton(toggle_lbl, callback_data=f"ap_panel_toggle_{pid}"))
+    kb.add(types.InlineKeyboardButton("🗑️ حذف پنل", callback_data=f"ap_panel_del_{pid}"))
+    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="ap_vpn_panel"))
+    bot.send_message(call.message.chat.id,
+        f"🎮 <b>اطلاعات پنل</b>\n\n"
+        f"نوع: {PANEL_TYPES.get(p['panel_type'], p['panel_type'])}\n"
+        f"آدرس: <code>{p['url']}</code>\n"
+        f"کاربر: <b>{p['username']}</b>\n"
+        f"وضعیت: {status_lbl}\n"
+        f"اضافه شده: {p['created_at'][:16]}",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_panel_test_") and is_admin(c.from_user.id))
+def cb_ap_panel_test(call):
+    bot.answer_callback_query(call.id)
+    pid = int(call.data[14:])
+    with get_db() as conn:
+        p = conn.execute("SELECT * FROM panels WHERE id=?", (pid,)).fetchone()
+    if not p: return
+    bot.send_message(call.message.chat.id, "⏳ در حال تست اتصال...")
+    token = _panel_get_token(dict(p))
+    if token:
+        bot.send_message(call.message.chat.id, "✅ <b>اتصال موفق!</b> پنل در دسترس است.")
+    else:
+        bot.send_message(call.message.chat.id, "❌ <b>اتصال ناموفق!</b> پنل در دسترس نیست یا اطلاعات اشتباه است.")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_panel_toggle_") and is_admin(c.from_user.id))
+def cb_ap_panel_toggle(call):
+    bot.answer_callback_query(call.id)
+    pid = int(call.data[16:])
+    with get_db() as conn:
+        p = conn.execute("SELECT active FROM panels WHERE id=?", (pid,)).fetchone()
+        new_val = 0 if p["active"] else 1
+        conn.execute("UPDATE panels SET active=? WHERE id=?", (new_val, pid)); conn.commit()
+    lbl = "✅ فعال" if new_val else "❌ غیرفعال"
+    bot.send_message(call.message.chat.id, f"پنل {lbl} شد.")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ap_panel_del_") and is_admin(c.from_user.id))
+def cb_ap_panel_del(call):
+    bot.answer_callback_query(call.id)
+    pid = int(call.data[13:])
+    with get_db() as conn:
+        conn.execute("DELETE FROM panels WHERE id=?", (pid,)); conn.commit()
+    bot.send_message(call.message.chat.id, "🗑️ پنل حذف شد.")
+
+# ── نگه داشتن handler قدیمی پنل برای سازگاری ──
 @bot.message_handler(func=lambda m: is_admin(m.from_user.id) and get_state(m.from_user.id).get("step") in ("adm_set_panel_url","adm_set_panel_token"))
 def adm_set_panel(msg):
     step = get_state(msg.from_user.id)["step"]; val = (msg.text or "").strip()
@@ -5889,20 +6803,34 @@ def _notify_all_admins_support_text(text):
 def _build_sb_ai_system(uid):
     """سیستم پرامپت هوش مصنوعی برای ربات پشتیبانی"""
     wallet = get_wallet(uid)
-    plans_text = "\n".join([f"- {p['label']}: {fmt(p['price'])} تومان" for p in PLANS.values()])
+    plans_text = "\n".join([f"- {p['label']}: {fmt(p['price'])} تومان" for p in PLANS.values()]) or "  (پلنی تنظیم نشده)"
     return (
-        "تو پشتیبان هوشمند ربات ViraNet هستی.\n\n"
-        "⚠️ قانون مطلق: فقط و فقط به زبان فارسی پاسخ بده. هرگز از انگلیسی، چینی یا هیچ زبان دیگری استفاده نکن. حتی یک کلمه به زبان غیرفارسی ننویس.\n\n"
-        f"موجودی کیف پول کاربر: {fmt(wallet)} تومان\n"
-        f"پلن‌های موجود:\n{plans_text}\n\n"
-        "قوانین:\n"
-        "۱. همیشه صمیمی و فارسی جواب بده\n"
-        "۲. اگه مشتری مشکل اتصال داره، راهنمایی کن\n"
-        "۳. اگه نیاز به ادمین بود بگو با @ViraNet0 تماس بگیرند\n"
-        "۴. هرگز 'نمی‌دونم' نگو — همیشه راهنمایی بده\n"
-        "۵. اگه مشتری خرید خواست بگو /buy بزنه\n"
-        "۶. اسامی فنی مثل VPN، وی‌پی‌ان، سرفشارک، ترون رو می‌تونی به همین شکل بنویسی ولی جملات باید فارسی باشن\n"
-    )
+        "تو پشتیبان هوشمند ربات ViraNet هستی. نقشت اینه که مثل یک پشتیبان حرفه‌ای ایرانی به مشتری کمک کنی.\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🚨 قوانین مطلق زبان:\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "۱. فقط و فقط فارسی بنویس — هیچ کلمه‌ای به انگلیسی، چینی، عربی یا هر زبان دیگری ننویس\n"
+        "۲. کلمات فنی مثل VPN، V2Ray، Surfshark، TRON، TRX، Config، Sub رو می‌تونی بنویسی ولی جمله‌ها باید کاملاً فارسی باشن\n"
+        "۳. اگه مدل‌ات به انگلیسی فکر می‌کنی، جواب رو به فارسی ترجمه کن قبل از فرستادن\n"
+        "۴. هرگز از پرانتز با توضیح انگلیسی استفاده نکن\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "📌 اطلاعات کاربر:\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"موجودی کیف پول: {fmt(wallet)} تومان\n"
+        f"پلن‌های VPN موجود:\n{plans_text}\n"
+        f"سرفشارک یک‌ساله: {fmt(SURFSHARK_1YEAR_PRICE)} تومان\n"
+        f"پشتیبان اصلی: @{SUPPORT_USERNAME}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🎯 نحوه پاسخ‌دهی:\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "۱. پاسخ‌ها کوتاه، مستقیم و گام‌به‌گام باشن\n"
+        "۲. از ایموجی مناسب استفاده کن\n"
+        "۳. اگه مشتری خرید خواست، بگو /buy رو بزنه\n"
+        "۴. اگه مشکل اتصال داشت: بگو اپ رو ری‌استارت کنه، سرور عوض کنه، یا با ساب‌لینک وصل بشه\n"
+        "۵. اگه سوال فنی داری که جواب نمی‌دونی، بگو با @{SUPPORT_USERNAME} تماس بگیرند\n"
+        "۶. هرگز 'نمی‌دونم' نگو — همیشه راه‌حل ارائه بده یا به پشتیبان انسانی هدایت کن\n"
+        "۷. رفتار صمیمی داشته باش، مثل یک دوست که از VPN سر در میاره\n"
+    ).replace("{SUPPORT_USERNAME}", SUPPORT_USERNAME)
 
 def _launch_support_bot(support_token):
     """ربات پشتیبانی را در thread جداگانه راه‌اندازی می‌کند"""
@@ -6427,8 +7355,33 @@ def _launch_support_bot(support_token):
                 text = (msg.text or "").strip()
                 if not text:
                     return
-                # اگه خواست خرید کنه
-                if any(w in text.lower() for w in ["خرید", "بخرم", "میخوام بخرم", "سرویس بده", "vpn بده", "وی پی ان"]):
+                t = text.lower()
+
+                # ── تشخیص درخواست surfshark مستقیم ──────────
+                SURF_KEYWORDS = [
+                    "surfshark", "سرفشارک", "سرف شارک", "سورف شارک",
+                    "سورفشارک", "سرف‌شارک", "surf shark",
+                ]
+                if SURFSHARK_ENABLED and any(w in t for w in SURF_KEYWORDS):
+                    ensure_user(msg.from_user)
+                    total = SURFSHARK_1YEAR_PRICE
+                    _sb_set(uid, step="sb_discount", plan_key="surfshark_1year", qty=1, total=total, base_total=total)
+                    kb = types.InlineKeyboardMarkup(row_width=1)
+                    kb.add(types.InlineKeyboardButton("⬅️ ندارم، ادامه بده", callback_data="sb_no_discount"))
+                    return sbot.send_message(
+                        msg.chat.id,
+                        f"🦈 <b>سرفشارک یک‌ساله نامحدود</b>\n\n"
+                        f"💰 مبلغ: <b>{fmt(total)} تومان</b>\n\n"
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        "🏷️ <b>کد تخفیف داری؟</b>\n\n"
+                        "اگه کد داری وارد کن، وگرنه دکمه زیر رو بزن 👇",
+                        reply_markup=kb
+                    )
+
+                # ── تشخیص درخواست خرید ──────────────────────
+                BUY_KW = ["خرید", "بخرم", "میخوام بخرم", "می‌خوام بخرم", "سرویس بده",
+                          "vpn بده", "وی پی ان", "خریدن", "اکانت بده", "بخوام"]
+                if any(w in t for w in BUY_KW):
                     reload_plans()
                     kb = types.InlineKeyboardMarkup(row_width=1)
                     if V2RAY_ENABLED and PLANS:
@@ -6440,11 +7393,18 @@ def _launch_support_bot(support_token):
                         "🛒 <b>فروشگاه ViraNet</b>\n\nچه سرویسی می‌خوای؟ 👇",
                         reply_markup=kb
                     )
-                # مستقیم AI جواب بده و وارد حالت چت بشه
-                _sb_set(uid, step="sb_chatting", history=[{"role": "user", "content": text}])
-                full_msgs = [{"role": "system", "content": _build_sb_ai_system(uid)}] + [{"role": "user", "content": text}]
+
+                # ── حالت عمومی: AI پاسخ می‌ده ───────────────
+                history = _sb_get(uid).get("history", [])
+                history.append({"role": "user", "content": text})
+                if len(history) > 12:
+                    history = history[-12:]
+                _sb_set(uid, step="sb_chatting", history=history)
+                full_msgs = [{"role": "system", "content": _build_sb_ai_system(uid)}] + history
+                sbot.send_chat_action(msg.chat.id, "typing")
                 reply = ai_chat(full_msgs)
-                _sb_get(uid)["history"].append({"role": "assistant", "content": reply})
+                history.append({"role": "assistant", "content": reply})
+                _sb_get(uid)["history"] = history
                 sbot.send_message(msg.chat.id, reply)
 
             print(f"[support_bot] ✅ راه‌اندازی شد: @{SUPPORT_BOT_USERNAME}")
