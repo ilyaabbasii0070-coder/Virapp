@@ -1291,98 +1291,141 @@ def cb_free_test(call):
     uid = call.from_user.id
     safe_delete(call.message.chat.id, call.message.message_id)
 
-    # چک خودکار حجم ساب‌لینک
-    _check_and_auto_disable_trial()
+    kb_back = types.InlineKeyboardMarkup(row_width=1)
+    kb_back.add(types.InlineKeyboardButton("🛒 خرید سرویس", callback_data="menu_shop"))
+    kb_back.add(types.InlineKeyboardButton("🏠 بازگشت", callback_data="back_main"))
 
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_main"))
-
-    if not FREE_TRIAL_ENABLED or not FREE_TRIAL_CONFIG:
-        bot.send_message(call.message.chat.id,
-            "📦 <b>تست رایگان ViraNet</b>\n\n"
+    if not FREE_TRIAL_ENABLED:
+        return bot.send_message(call.message.chat.id,
+            "📦 <b>تست رایگان</b>\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "🙏 <b>ممنون از علاقه‌مندی شما!</b>\n\n"
-            "⏳ متأسفانه در حال حاضر <b>تست رایگان</b> در دسترس نیست.\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "💡 <b>پیشنهاد ما:</b>\n\n"
-            "   🌸 پلن <b>پلوتو</b> با کمترین قیمت را امتحان کنید\n"
-            "   📦 ۲ گیگابایت | ۳۰ روز\n"
-            "   ✅ فعال‌سازی فوری\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "🔔 به زودی تست رایگان فعال می‌شود!\n\n"
+            "⏳ در حال حاضر تست رایگان در دسترس نیست.\n\n"
             f"❓ اطلاعات بیشتر: @{SUPPORT_USERNAME}",
-            reply_markup=kb
+            reply_markup=kb_back
         )
-        return
 
     # چک یک‌بار استفاده
     with get_db() as conn:
         already_used = conn.execute("SELECT 1 FROM free_trial_used WHERE user_id=?", (uid,)).fetchone()
 
     if already_used:
-        bot.send_message(call.message.chat.id,
-            "📦 <b>تست رایگان ViraNet</b>\n\n"
+        return bot.send_message(call.message.chat.id,
+            "📦 <b>تست رایگان</b>\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "⚠️ <b>شما قبلاً از تست رایگان استفاده کرده‌اید!</b>\n\n"
-            "هر کاربر فقط یک بار می‌تواند از تست رایگان استفاده کند.\n\n"
+            "⚠️ شما قبلاً از تست رایگان استفاده کرده‌اید.\n\n"
+            "هر کاربر فقط یک بار می‌تواند تست رایگان دریافت کند.\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "💡 برای خرید سرویس کامل از فروشگاه اقدام کنید.\n\n"
-            f"❓ پشتیبانی: @{SUPPORT_USERNAME}",
-            reply_markup=kb
+            "💡 برای خرید سرویس کامل دکمه زیر را بزنید:",
+            reply_markup=kb_back
         )
-        return
 
     # ثبت استفاده
     with get_db() as conn:
         conn.execute("INSERT OR IGNORE INTO free_trial_used(user_id) VALUES(?)", (uid,))
         conn.commit()
 
-    safe_cfg = html_lib.escape(FREE_TRIAL_CONFIG)
-    sub_is_url = FREE_TRIAL_SUB_LINK.startswith("http")
+    # ── تلاش برای ساخت روی پنل ──────────────────────
+    active_panel = get_active_panel()
+    auto_name = f"trial_{uid}"
+    trial_gb   = FREE_TRIAL_GB   or 1
+    trial_days = FREE_TRIAL_DAYS or 7
 
-    kb2 = types.InlineKeyboardMarkup(row_width=1)
-    if sub_is_url:
-        kb2.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=FREE_TRIAL_SUB_LINK))
-    kb2.add(types.InlineKeyboardButton("🛒 خرید سرویس کامل", callback_data="menu_shop"))
-    kb2.add(types.InlineKeyboardButton("🏠 بازگشت به منو", callback_data="back_main"))
+    if active_panel:
+        bot.send_message(call.message.chat.id, "⏳ <b>در حال ساخت سرویس تست...</b>")
+        sub, cfg = _panel_create_user(dict(active_panel), auto_name, trial_gb, trial_days)
+        if sub or cfg:
+            sub_is_url = (sub or "").startswith("http")
+            kb2 = types.InlineKeyboardMarkup(row_width=1)
+            if sub_is_url:
+                kb2.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=sub))
+            kb2.add(types.InlineKeyboardButton("🛒 خرید سرویس کامل", callback_data="menu_shop"))
 
-    # QR کد
-    qr_buf = make_qr_bytes(FREE_TRIAL_SUB_LINK if sub_is_url else FREE_TRIAL_CONFIG)
-    if qr_buf:
+            qr_target = sub if sub_is_url else cfg
+            if qr_target:
+                qr_buf = make_qr_bytes(qr_target)
+                if qr_buf:
+                    try: bot.send_photo(uid, qr_buf, caption="📷 QR تست رایگان")
+                    except Exception: pass
+
+            if sub_is_url:
+                txt = (
+                    "🎁 <b>تست رایگان شما آماده است!</b>\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"💾 <b>حجم:</b> {trial_gb} گیگابایت\n"
+                    f"📅 <b>مدت:</b> {trial_days} روز\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "🔗 <b>ساب‌لینک</b> (روی متن بزنید تا کپی شود):\n\n"
+                    f"<code>{html_lib.escape(sub)}</code>\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "📲 <b>نحوه اتصال:</b>\n"
+                    "  ۱. دکمه «اتصال» زیر را بزنید\n"
+                    "  ۲. یا QR بالا را اسکن کنید\n\n"
+                    "⚠️ این تست فقط یک بار در اختیار شماست.\n\n"
+                    f"🆘 پشتیبانی: @{SUPPORT_USERNAME}"
+                )
+            else:
+                txt = (
+                    "🎁 <b>تست رایگان شما آماده است!</b>\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"💾 <b>حجم:</b> {trial_gb} گیگابایت\n"
+                    f"📅 <b>مدت:</b> {trial_days} روز\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "🔐 <b>کانفیگ</b> (بزنید تا کپی شود):\n\n"
+                    f"<code>{html_lib.escape(cfg)}</code>\n\n"
+                    "⚠️ این تست فقط یک بار در اختیار شماست.\n\n"
+                    f"🆘 پشتیبانی: @{SUPPORT_USERNAME}"
+                )
+            return bot.send_message(uid, txt, reply_markup=kb2)
+        # ساخت روی پنل شکست — اطلاع به ادمین
         try:
-            bot.send_photo(call.message.chat.id, qr_buf,
-                caption="📷 <b>QR کد تست رایگان — برای اسکن استفاده کنید</b>"
+            bot.send_message(ADMIN_ID,
+                f"⚠️ <b>درخواست تست رایگان</b>\n\n"
+                f"👤 کاربر: <code>{uid}</code>\n"
+                f"💾 {trial_gb}GB — {trial_days} روز\n\n"
+                "❌ ساخت روی پنل ناموفق بود — لطفاً دستی ارسال کنید."
             )
         except Exception: pass
 
-    msg_text = (
-        "🎁 <b>تست رایگان ViraNet</b> 🎉\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📦 <b>حجم:</b>  {FREE_TRIAL_GB} گیگابایت\n"
-        f"📅 <b>مدت:</b>  {FREE_TRIAL_DAYS} روز\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🔐 <b>کانفیگ</b>  👆 <i>بزنید تا کپی شود</i>\n\n"
-        f"<code>{safe_cfg}</code>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    )
-    if sub_is_url:
-        msg_text += (
-            "🔗 <b>ساب‌لینک</b>  👆 <i>بزنید تا کپی شود</i>\n\n"
-            f"<code>{html_lib.escape(FREE_TRIAL_SUB_LINK)}</code>\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        )
-    msg_text += (
-        "📌 <b>راهنمای اتصال:</b>\n\n"
-        "  1️⃣  کانفیگ را کپی کرده در اپ ایمپورت کنید\n"
-        "  2️⃣  یا دکمه ساب‌لینک زیر را بزنید\n"
-        "  3️⃣  یا QR کد بالا را اسکن کنید\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "⚠️ <b>توجه:</b> این تست فقط یک بار برای شما فعال است.\n\n"
-        f"🆘 پشتیبانی: @{SUPPORT_USERNAME}\n"
-        "💙 از اعتماد شما سپاسگزاریم! 🌟"
-    )
-    bot.send_message(call.message.chat.id, msg_text, reply_markup=kb2)
+    # ── حالت بدون پنل یا شکست پنل — کانفیگ دستی ────
+    if FREE_TRIAL_CONFIG:
+        sub_is_url = FREE_TRIAL_SUB_LINK.startswith("http")
+        kb2 = types.InlineKeyboardMarkup(row_width=1)
+        if sub_is_url:
+            kb2.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=FREE_TRIAL_SUB_LINK))
+        kb2.add(types.InlineKeyboardButton("🛒 خرید سرویس کامل", callback_data="menu_shop"))
 
+        qr_target = FREE_TRIAL_SUB_LINK if sub_is_url else FREE_TRIAL_CONFIG
+        qr_buf = make_qr_bytes(qr_target)
+        if qr_buf:
+            try: bot.send_photo(uid, qr_buf, caption="📷 QR تست رایگان")
+            except Exception: pass
+
+        txt = (
+            "🎁 <b>تست رایگان شما آماده است!</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"💾 <b>حجم:</b> {trial_gb} گیگابایت\n"
+            f"📅 <b>مدت:</b> {trial_days} روز\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🔐 <b>کانفیگ</b> (بزنید تا کپی شود):\n\n"
+            f"<code>{html_lib.escape(FREE_TRIAL_CONFIG)}</code>\n\n"
+        )
+        if sub_is_url:
+            txt += (
+                "🔗 <b>ساب‌لینک:</b>\n\n"
+                f"<code>{html_lib.escape(FREE_TRIAL_SUB_LINK)}</code>\n\n"
+            )
+        txt += (
+            "⚠️ این تست فقط یک بار در اختیار شماست.\n\n"
+            f"🆘 پشتیبانی: @{SUPPORT_USERNAME}"
+        )
+        return bot.send_message(uid, txt, reply_markup=kb2)
+
+    # هیچ چیزی تنظیم نشده
+    bot.send_message(uid,
+        "⏳ تست رایگان هنوز آماده نیست.\n\n"
+        f"برای اطلاعات بیشتر با @{SUPPORT_USERNAME} تماس بگیرید.",
+        reply_markup=kb_back
+    )
 # ── درخواست نمایندگی ────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data == "menu_agency")
 def cb_agency(call):
@@ -2877,43 +2920,69 @@ def cb_ren_approve(call):
 def cb_ren_done(call):
     if not is_admin(call.from_user.id): return bot.answer_callback_query(call.id, "دسترسی ندارید", show_alert=True)
     ren_id = int(call.data[9:])
-    bot.answer_callback_query(call.id, "✅ تمدید ثبت شد!", show_alert=True)
+    bot.answer_callback_query(call.id, "⏳ در حال تمدید...", show_alert=False)
     with get_db() as conn:
         ren = conn.execute("SELECT * FROM renewal_orders WHERE id=?", (ren_id,)).fetchone()
         if not ren: return bot.send_message(call.message.chat.id, "❌ سفارش یافت نشد.")
         conn.execute("UPDATE renewal_orders SET status='delivered' WHERE id=?", (ren_id,))
         conn.commit()
     safe_delete(call.message.chat.id, call.message.message_id)
-    bot.send_message(call.message.chat.id, f"✅ تمدید سرویس #{ren_id} انجام شد.")
-    # پیام به کاربر
+
     plan = PLANS.get(ren["plan_key"], {})
+    with get_db() as conn:
+        svc = conn.execute("SELECT * FROM order_services WHERE id=?", (ren["svc_id"],)).fetchone()
+
+    # ── تلاش برای تمدید روی پنل ─────────────────────
+    panel_renewed = False
+    active_panel = get_active_panel()
+    if active_panel and svc and svc.get("panel_username") and plan.get("gb") and plan.get("days"):
+        ok = _panel_reset_user(dict(active_panel), svc["panel_username"], plan["gb"], plan["days"])
+        if ok:
+            panel_renewed = True
+            bot.send_message(call.message.chat.id,
+                f"✅ <b>سرویس روی پنل تمدید شد!</b>\n\n"
+                f"👤 کاربر پنل: <code>{svc['panel_username']}</code>\n"
+                f"💾 {plan.get('gb','?')}GB — {plan.get('days','?')} روز اضافه شد"
+            )
+        else:
+            bot.send_message(call.message.chat.id,
+                "⚠️ تمدید روی پنل ناموفق بود — لطفاً دستی تمدید کنید.\n"
+                f"👤 کاربر پنل: <code>{svc.get('panel_username','نامشخص')}</code>"
+            )
+    elif not active_panel:
+        bot.send_message(call.message.chat.id, f"✅ تمدید #{ren_id} ثبت شد.")
+
+    # ── پیام به کاربر ───────────────────────────────
     try:
-        # بررسی ساب‌لینک برای نمایش حجم جدید
-        with get_db() as conn:
-            svc = conn.execute("SELECT * FROM order_services WHERE id=?", (ren["svc_id"],)).fetchone()
-        sub = (svc["sub_link"] or "") if svc else ""
-        usage_text = ""
-        if sub.startswith("http"):
-            try:
-                info = get_sub_info(sub)
-                if info:
-                    usage_text = (
-                        "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        "📊 <b>وضعیت جدید سرویس:</b>\n\n"
-                        + _build_usage_text(info)
-                    )
-            except Exception: pass
+        u = get_user(ren["user_id"])
         svc_name = svc["service_name"] if svc else "سرویس شما"
+        sub = (svc["sub_link"] or "") if svc else ""
+        sub_is_url = sub.startswith("http")
+
+        # گرفتن اطلاعات جدید از ساب‌لینک
+        usage_text = ""
+        if sub_is_url and panel_renewed:
+            import time as _t; _t.sleep(2)  # کمی صبر تا پنل آپدیت شه
+            info = get_sub_info(sub)
+            if info:
+                usage_text = "\n\n" + _build_usage_text(info)
+
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        if sub_is_url:
+            kb.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=sub))
+
         bot.send_message(ren["user_id"],
             f"🎉 <b>سرویس شما با موفقیت تمدید شد!</b>\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"🏷️ <b>سرویس:</b> {html_lib.escape(svc_name)}\n"
             f"📦 <b>پلن:</b> {plan.get('label','---')}\n"
-            f"🕐 <b>زمان تمدید:</b> {datetime.now().strftime('%Y/%m/%d — %H:%M')}"
+            f"💾 <b>حجم:</b> {plan.get('gb','?')} گیگابایت\n"
+            f"📅 <b>مدت:</b> {plan.get('days','?')} روز\n"
+            f"🕐 <b>تمدید:</b> {datetime.now().strftime('%Y/%m/%d — %H:%M')}"
             f"{usage_text}\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🆘 پشتیبانی: @{SUPPORT_USERNAME}\n"
-            "💙 از اعتماد شما سپاسگزاریم! 🌟"
+            f"🆘 پشتیبانی: @{SUPPORT_USERNAME}",
+            reply_markup=kb if sub_is_url else None
         )
     except Exception as e:
         print(f"[ren_done] {e}")
@@ -2999,9 +3068,8 @@ def cb_admin_approve(call):
         f"🔢 تعداد سرویس: <b>{qty}</b> عدد\n\n"
         f"{panel_note}"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📋 <b>مرحله ۱:</b> کانفیگ سرویس اول را ارسال کنید\n"
-        "📡 <b>مرحله ۲:</b> ساب‌لینک آن را ارسال کنید\n"
-        "🔁 این کار را برای هر سرویس تکرار کنید\n"
+        "📡 ساب‌لینک‌ها را یکی یکی ارسال کنید\n"
+        "   <i>(اگه فقط کانفیگ دارید، اونو بفرستید)</i>\n\n"
         "✅ در پایان /done بفرستید یا دکمه زیر را بزنید:",
         reply_markup=kb
     )
@@ -3014,12 +3082,13 @@ def cb_adm_done(call):
     if state.get("step") != "adm_config" or state.get("order_id") != order_id: return
     bot.answer_callback_query(call.id)
     configs = state.get("configs", []); subs = state.get("subs", [])
-    if not configs:
-        return bot.send_message(call.message.chat.id, "⚠️ هیچ کانفیگی ثبت نشده است.")
+    if not configs and not subs:
+        return bot.send_message(call.message.chat.id, "⚠️ هیچ ساب‌لینکی ثبت نشده است.")
+    while len(configs) < len(subs): configs.append("")
     _deliver_configs(order_id, configs, subs)
     _delete_receipt_admin_msg(order_id)
     clear_state(call.from_user.id)
-    bot.send_message(call.message.chat.id, f"✅ <b>{len(configs)} کانفیگ با موفقیت ارسال شد!</b>")
+    bot.send_message(call.message.chat.id, f"✅ <b>{len(subs)} سرویس با موفقیت ارسال شد!</b>")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_rej_"))
 def cb_admin_reject(call):
@@ -3072,46 +3141,68 @@ def adm_receive_config(msg):
     if msg.text and msg.text.strip() == "/done":
         state = get_state(msg.from_user.id); order_id = state["order_id"]
         configs = state.get("configs", []); subs = state.get("subs", [])
-        if not configs: return bot.send_message(msg.chat.id, "⚠️ هیچ کانفیگی ثبت نشده.")
+        if not configs and not subs: return bot.send_message(msg.chat.id, "⚠️ هیچ ساب‌لینکی ثبت نشده.")
+        # اگه فقط ساب‌لینک داریم، configs رو همون بذار
+        while len(configs) < len(subs): configs.append("")
         _deliver_configs(order_id, configs, subs)
         _delete_receipt_admin_msg(order_id)
         clear_state(msg.from_user.id)
-        return bot.send_message(msg.chat.id, f"✅ <b>{len(configs)} کانفیگ ارسال شد.</b>")
-    state = get_state(msg.from_user.id); configs = state.get("configs", []); subs = state.get("subs", [])
-    text = (msg.text or "").strip()
+        return bot.send_message(msg.chat.id, f"✅ <b>{len(subs)} سرویس ارسال شد.</b>")
+    state = get_state(msg.from_user.id)
+    configs = state.get("configs", [])
+    subs    = state.get("subs", [])
+    text    = (msg.text or "").strip()
     if not text: return bot.send_message(msg.chat.id, "⚠️ متن خالی است.")
-    if len(configs) == len(subs):
-        configs.append(text); set_state(msg.from_user.id, configs=configs)
-        bot.send_message(msg.chat.id,
-            f"✅ <b>کانفیگ {len(configs)} ثبت شد.</b>\n\n"
-            "📡 حالا ساب‌لینک این کانفیگ را ارسال کنید:\n"
-            "<i>(اگر ساب‌لینک ندارد یک خط تیره - بفرستید)</i>"
-        )
-    else:
-        sub_text = text if text != "-" else ""
-        subs.append(sub_text); set_state(msg.from_user.id, subs=subs)
-        expected = state.get("expected_qty", 999)
-        if len(configs) >= expected:
-            # همه سرویس‌ها ثبت شدن، ارسال خودکار
+    expected = state.get("expected_qty", 999)
+
+    # ── اگه ساب‌لینک هست (با http شروع میشه) → مستقیم تحویل ──
+    if text.startswith("http"):
+        subs.append(text); configs.append("")
+        set_state(msg.from_user.id, configs=configs, subs=subs)
+        if len(subs) >= expected:
             order_id = state["order_id"]
             _deliver_configs(order_id, configs, subs)
             _delete_receipt_admin_msg(order_id)
             clear_state(msg.from_user.id)
-            bot.send_message(msg.chat.id, f"✅ <b>همه {len(configs)} کانفیگ ارسال شد!</b>")
+            bot.send_message(msg.chat.id, f"✅ <b>همه {len(subs)} ساب‌لینک ارسال شد!</b>")
         else:
             bot.send_message(msg.chat.id,
-                f"✅ <b>ساب‌لینک {len(subs)} ثبت شد.</b>\n\n"
-                f"📋 کانفیگ بعدی را ارسال کنید (سرویس {len(configs)+1}):"
+                f"✅ ساب‌لینک {len(subs)} ثبت شد.\n\n"
+                f"📡 ساب‌لینک سرویس {len(subs)+1} را ارسال کنید:"
             )
+    else:
+        # ── کانفیگ متنی ──
+        if len(configs) == len(subs):
+            configs.append(text); set_state(msg.from_user.id, configs=configs)
+            bot.send_message(msg.chat.id,
+                f"✅ کانفیگ {len(configs)} ثبت شد.\n\n"
+                "📡 ساب‌لینک این سرویس را ارسال کنید:\n"
+                "<i>(اگه ساب‌لینک ندارد یک خط تیره - بفرستید)</i>"
+            )
+        else:
+            sub_text = text if text != "-" else ""
+            subs.append(sub_text); set_state(msg.from_user.id, subs=subs)
+            if len(configs) >= expected:
+                order_id = state["order_id"]
+                _deliver_configs(order_id, configs, subs)
+                _delete_receipt_admin_msg(order_id)
+                clear_state(msg.from_user.id)
+                bot.send_message(msg.chat.id, f"✅ <b>همه {len(configs)} سرویس ارسال شد!</b>")
+            else:
+                bot.send_message(msg.chat.id,
+                    f"✅ ساب‌لینک {len(subs)} ثبت شد.\n\n"
+                    f"📋 کانفیگ سرویس {len(configs)+1} را ارسال کنید:"
+                )
 
 def _deliver_configs(order_id, configs, subs):
     with get_db() as conn:
         order = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
         svc_rows = conn.execute("SELECT * FROM order_services WHERE order_id=? ORDER BY id", (order_id,)).fetchall()
     if not order or not svc_rows: return
-    plan = PLANS.get(order["plan_key"], {"gb":"?", "days":"?"}); user_id = order["user_id"]
+    plan = PLANS.get(order["plan_key"], {"gb":"?", "days":"?", "label":"---"})
+    user_id = order["user_id"]
     for i, svc in enumerate(svc_rows):
-        cfg = configs[i] if i < len(configs) else "---"
+        cfg = configs[i] if i < len(configs) else ""
         sub = subs[i]    if i < len(subs)    else ""
         try:
             with get_db() as conn:
@@ -3121,45 +3212,67 @@ def _deliver_configs(order_id, configs, subs):
             print(f"[deliver] {e}"); continue
 
         activation_time = datetime.now().strftime("%Y/%m/%d — %H:%M")
-        safe_cfg = html_lib.escape(cfg); sub_is_url = sub.startswith("http")
+        sub_is_url = sub.startswith("http")
 
-        qr_buf = make_qr_bytes(sub if sub else cfg)
-        if qr_buf:
-            try: bot.send_photo(user_id, qr_buf)
-            except Exception as e: print(f"[QR] {e}")
+        # ── فقط QR ساب‌لینک ─────────────────────────
+        qr_target = sub if sub_is_url else cfg
+        if qr_target:
+            qr_buf = make_qr_bytes(qr_target)
+            if qr_buf:
+                try: bot.send_photo(user_id, qr_buf,
+                    caption="📷 <b>QR کد سرویس</b> — با اپ اسکن کنید"
+                )
+                except Exception as e: print(f"[QR] {e}")
 
         kb = types.InlineKeyboardMarkup(row_width=1)
         if sub_is_url:
             kb.add(types.InlineKeyboardButton("🔗 اتصال با ساب‌لینک", url=sub))
-        kb.add(types.InlineKeyboardButton("✏️ تغییر نام سرویس", callback_data=f"rename_{svc['id']}"))
+        kb.add(types.InlineKeyboardButton("🔄 تمدید سرویس", callback_data=f"renew_{svc['id']}"))
+        kb.add(types.InlineKeyboardButton("✏️ تغییر نام", callback_data=f"rename_{svc['id']}"))
 
-        full_text = (
-            f"🎉 <b>سرویس شما فعال شد!</b> 🚀\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🏷️ <b>نام سرویس:</b>  {html_lib.escape(svc['service_name'])}\n"
-            f"📊 <b>حجم:</b>  {plan['gb']} گیگابایت\n"
-            f"📅 <b>اعتبار:</b>  {plan['days']} روز\n"
-            f"🕐 <b>فعال‌سازی:</b>  {activation_time}\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "🔐 <b>کانفیگ</b>  👆 <i>بزنید تا کپی شود</i>\n\n"
-            f"<code>{safe_cfg}</code>\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        )
-        if sub:
-            full_text += (
-                "🔗 <b>ساب‌لینک</b>  👆 <i>بزنید تا کپی شود</i>\n\n"
+        # ── پیام فعال‌سازی ───────────────────────────
+        if sub_is_url:
+            # حالت پنل — فقط ساب‌لینک
+            full_text = (
+                "✅ <b>سرویس شما فعال شد!</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🏷️ <b>نام:</b> {html_lib.escape(svc['service_name'])}\n"
+                f"📦 <b>پلن:</b> {plan.get('label','---')}\n"
+                f"💾 <b>حجم:</b> {plan['gb']} گیگابایت\n"
+                f"📅 <b>اعتبار:</b> {plan['days']} روز\n"
+                f"🕐 <b>فعال‌سازی:</b> {activation_time}\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "🔗 <b>ساب‌لینک</b> (روی متن بزنید تا کپی شود):\n\n"
                 f"<code>{html_lib.escape(sub)}</code>\n\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📲 <b>نحوه اتصال:</b>\n\n"
+                "  ۱. دکمه «اتصال با ساب‌لینک» زیر را بزنید\n"
+                "  ۲. یا ساب‌لینک را کپی کرده در اپ وارد کنید\n"
+                "  ۳. یا QR بالا را با اپ اسکن کنید\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🆘 پشتیبانی: @{SUPPORT_USERNAME}"
             )
-        full_text += (
-            "📌 <b>راهنما:</b>\n\n"
-            "  1️⃣  کانفیگ را کپی کرده در اپ ایمپورت کنید\n"
-            "  2️⃣  یا دکمه ساب‌لینک زیر را بزنید\n"
-            "  3️⃣  یا QR کد بالایی را اسکن کنید\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🆘 پشتیبانی: @{SUPPORT_USERNAME}\n"
-            "💙 از اعتماد شما سپاسگزاریم! 🌟"
-        )
+        else:
+            # حالت دستی — کانفیگ + ساب‌لینک
+            safe_cfg = html_lib.escape(cfg) if cfg else "---"
+            full_text = (
+                "✅ <b>سرویس شما فعال شد!</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🏷️ <b>نام:</b> {html_lib.escape(svc['service_name'])}\n"
+                f"📦 <b>پلن:</b> {plan.get('label','---')}\n"
+                f"💾 <b>حجم:</b> {plan['gb']} گیگابایت\n"
+                f"📅 <b>اعتبار:</b> {plan['days']} روز\n"
+                f"🕐 <b>فعال‌سازی:</b> {activation_time}\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "🔐 <b>کانفیگ</b> (روی متن بزنید تا کپی شود):\n\n"
+                f"<code>{safe_cfg}</code>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📲 <b>نحوه اتصال:</b>\n\n"
+                "  ۱. کانفیگ بالا را کپی و در اپ import کنید\n"
+                "  ۲. یا QR بالا را با اپ اسکن کنید\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🆘 پشتیبانی: @{SUPPORT_USERNAME}"
+            )
         try: bot.send_message(user_id, full_text, reply_markup=kb)
         except Exception as e: print(f"[deliver] {e}")
 
@@ -3167,12 +3280,6 @@ def _deliver_configs(order_id, configs, subs):
         conn.execute("UPDATE orders SET status='delivered' WHERE id=?", (order_id,))
         conn.execute("UPDATE receipts SET status='approved' WHERE order_id=?", (order_id,))
         conn.commit()
-    # ثبت استفاده از کد تخفیف (اگر این سفارش با کد تخفیف بوده)
-    with get_db() as conn:
-        ord_row = conn.execute("SELECT payment_method FROM orders WHERE id=?", (order_id,)).fetchone()
-    # discount_code رو از order_services نداریم، ولی توی order.payment_method ذخیره نمیشه
-    # پس از جدول orders کد تخفیف رو نمیتونیم بدونیم — جای دیگه ذخیره نشده
-    # این بخش آماده‌ست در صورتی که در آینده کد تخفیف به جدول orders اضافه بشه
 
 # ── Rename ──────────────────────────────────────
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rename_"))
@@ -3219,8 +3326,37 @@ def cb_renew_svc(call):
     bot.answer_callback_query(call.id)
     plan = PLANS.get(svc["plan_key"], {})
     if not plan:
-        return bot.send_message(call.message.chat.id, "❌ پلن این سرویس دیگر موجود نیست. لطفاً با پشتیبانی تماس بگیرید.")
-    total = plan["price"]
+        return bot.send_message(call.message.chat.id,
+            "❌ پلن این سرویس دیگر موجود نیست.\n\nبرای تمدید با پشتیبانی تماس بگیرید."
+        )
+    base_price = plan["price"]
+    plan_gb    = plan.get("gb", 0)
+
+    # ── محاسبه قیمت بر اساس حجم مانده ─────────────
+    sub = svc["sub_link"] or ""
+    remaining_gb = None
+    total = base_price
+    usage_note = ""
+
+    if sub.startswith("http") and plan_gb:
+        bot.send_chat_action(call.message.chat.id, "typing")
+        info = get_sub_info(sub)
+        if info and info.get("total", 0) > 0:
+            rem_bytes = info.get("remaining_bytes", 0)
+            remaining_gb = round(rem_bytes / (1024**3), 2)
+            if remaining_gb > 0 and plan_gb > 0:
+                # قیمت = (حجم مانده / کل حجم) × قیمت پایه
+                ratio = remaining_gb / plan_gb
+                total = max(1000, int(base_price * ratio))
+                usage_note = (
+                    f"\n\n📊 <b>حجم مانده:</b> {remaining_gb} گیگابایت از {plan_gb} گیگابایت\n"
+                    f"💡 <b>قیمت تمدید بر اساس حجم مانده:</b> {fmt(total)} تومان"
+                )
+            else:
+                usage_note = f"\n\n📊 <b>حجم مانده:</b> {remaining_gb} گیگابایت"
+        else:
+            usage_note = "\n\n📊 <i>اطلاعات حجم در دسترس نیست</i>"
+
     wallet = get_wallet(uid)
     set_state(uid, step="renew_payment", renew_svc_id=svc_id, renew_plan_key=svc["plan_key"],
               renew_total=total, renew_svc_name=svc["service_name"])
@@ -3235,9 +3371,10 @@ def cb_renew_svc(call):
         f"🔄 <b>تمدید سرویس</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🏷️ <b>سرویس:</b> {html_lib.escape(svc['service_name'])}\n"
-        f"📦 <b>پلن:</b> {plan.get('label','---')}\n"
+        f"📦 <b>پلن:</b> {plan.get('label','---')}"
+        f"{usage_note}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💰 <b>مبلغ تمدید:</b> {fmt(total)} تومان\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👇 روش پرداخت را انتخاب کنید:",
         reply_markup=kb
     )
@@ -3941,26 +4078,26 @@ def adm_set_support(msg):
 def cb_ap_free_trial(call):
     bot.answer_callback_query(call.id)
     status = "✅ فعال" if FREE_TRIAL_ENABLED else "❌ غیرفعال"
-    kb = types.InlineKeyboardMarkup(row_width=1)
     toggle_lbl = "❌ غیرفعال کردن" if FREE_TRIAL_ENABLED else "✅ فعال کردن"
-    kb.add(types.InlineKeyboardButton(toggle_lbl,                  callback_data="ap_trial_toggle"))
-    kb.add(types.InlineKeyboardButton("📅 تعداد روز",              callback_data="ap_trial_days"))
-    kb.add(types.InlineKeyboardButton("📦 حجم (گیگابایت)",         callback_data="ap_trial_gb"))
-    kb.add(types.InlineKeyboardButton("🔐 کانفیگ تست رایگان",      callback_data="ap_trial_config"))
-    kb.add(types.InlineKeyboardButton("🔗 ساب‌لینک (چک حجم خودکار)", callback_data="ap_trial_sub"))
-    kb.add(types.InlineKeyboardButton("📊 چک حجم ساب‌لینک الان",   callback_data="ap_trial_check_sub"))
-    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",                callback_data="ap_settings"))
-    sub_status = f"<code>{FREE_TRIAL_SUB_LINK[:40]}...</code>" if len(FREE_TRIAL_SUB_LINK) > 40 else (f"<code>{FREE_TRIAL_SUB_LINK}</code>" if FREE_TRIAL_SUB_LINK else "<i>تنظیم نشده</i>")
+    active_panel = get_active_panel()
+    panel_note = f"✅ پنل فعال: {PANEL_TYPES.get(active_panel['panel_type'], '---')}" if active_panel else "❌ پنل وصل نشده — باید کانفیگ دستی تنظیم شود"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(toggle_lbl,                     callback_data="ap_trial_toggle"))
+    kb.add(types.InlineKeyboardButton(f"📅 تعداد روز — {FREE_TRIAL_DAYS} روز", callback_data="ap_trial_days"))
+    kb.add(types.InlineKeyboardButton(f"📦 حجم — {FREE_TRIAL_GB} گیگ",        callback_data="ap_trial_gb"))
+    if not active_panel:
+        kb.add(types.InlineKeyboardButton("🔐 کانفیگ دستی تست رایگان",        callback_data="ap_trial_config"))
+    kb.add(types.InlineKeyboardButton("🔙 تنظیمات",                           callback_data="ap_settings"))
     bot.send_message(call.message.chat.id,
         "🎁 <b>تست رایگان</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"وضعیت: <b>{status}</b>\n"
         f"⏱ مدت: <b>{FREE_TRIAL_DAYS} روز</b>\n"
         f"📦 حجم: <b>{FREE_TRIAL_GB} گیگ</b>\n"
-        f"🔐 کانفیگ: {'<i>تنظیم شده</i>' if FREE_TRIAL_CONFIG else '<i>تنظیم نشده</i>'}\n"
-        f"🔗 ساب‌لینک: {sub_status}\n\n"
+        f"📡 پنل: {panel_note}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "💡 با تنظیم ساب‌لینک، وقتی حجم تموم شد تست رایگان خودکار غیرفعال می‌شود.",
+        "💡 وقتی پنل فعال باشد، سرویس تست خودکار ساخته می‌شود.\n"
+        "اگر پنل نباشد، کانفیگ دستی ارسال می‌شود.",
         reply_markup=kb
     )
 
